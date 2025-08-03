@@ -244,7 +244,7 @@ class AudioEngine {
     private func createBuffer(from data: Data) -> AVAudioPCMBuffer? {
         let frameCount = UInt32(data.count) / 2 // 16-bit input = 2 bytes per frame
         
-        // Create buffer with output format (24kHz) for playback
+        // Create buffer with output format (24kHz) - assume input data is also 24kHz
         guard let buffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else {
             return nil
         }

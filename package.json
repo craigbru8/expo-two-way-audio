@@ -1,6 +1,6 @@
 {
   "name": "@speechmatics/expo-two-way-audio",
-  "version": "0.1.4-with-vad",
+  "version": "0.1.5-optimized",
   "description": "Native module for two way audio streaming",
   "main": "build/index.js",
   "types": "build/index.d.ts",

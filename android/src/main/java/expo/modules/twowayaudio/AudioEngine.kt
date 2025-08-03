@@ -279,53 +279,15 @@ class AudioEngine (context: Context) {
     }
 
     fun playPCMData(data: ByteArray) {
-        // Convert incoming audio data to output sample rate if needed
-        val convertedData = resampleAudio(data, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
-        audioSampleQueue.add(convertedData)
+        // Assume incoming audio is 24kHz (matches output sample rate) - no resampling needed
+        // This is optimal for Gemini Live and other 24kHz audio sources
+        audioSampleQueue.add(data)
         if (!isPlaying) {
             playAudioFromSampleQueue()
         }
     }
     
-    private fun resampleAudio(inputData: ByteArray, inputSampleRate: Int, outputSampleRate: Int): ByteArray {
-        if (inputSampleRate == outputSampleRate) {
-            return inputData
-        }
-        
-        // Convert ByteArray to ShortArray for processing
-        val inputSamples = ShortArray(inputData.size / 2)
-        for (i in inputSamples.indices) {
-            inputSamples[i] = (inputData[i * 2].toInt() or (inputData[i * 2 + 1].toInt() shl 8)).toShort()
-        }
-        
-        // Simple linear interpolation resampling
-        val ratio = outputSampleRate.toDouble() / inputSampleRate.toDouble()
-        val outputLength = (inputSamples.size * ratio).toInt()
-        val outputSamples = ShortArray(outputLength)
-        
-        for (i in outputSamples.indices) {
-            val inputIndex = i / ratio
-            val index = inputIndex.toInt()
-            
-            if (index < inputSamples.size - 1) {
-                val fraction = inputIndex - index
-                val sample1 = inputSamples[index].toDouble()
-                val sample2 = inputSamples[index + 1].toDouble()
-                outputSamples[i] = (sample1 + fraction * (sample2 - sample1)).toInt().toShort()
-            } else if (index < inputSamples.size) {
-                outputSamples[i] = inputSamples[index]
-            }
-        }
-        
-        // Convert back to ByteArray
-        val outputData = ByteArray(outputSamples.size * 2)
-        for (i in outputSamples.indices) {
-            outputData[i * 2] = (outputSamples[i].toInt() and 0xFF).toByte()
-            outputData[i * 2 + 1] = ((outputSamples[i].toInt() shr 8) and 0xFF).toByte()
-        }
-        
-        return outputData
-    }
+
 
     private fun playAudioFromSampleQueue() {
         executorServicePlayback.execute{
