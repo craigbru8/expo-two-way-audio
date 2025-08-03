@@ -41,6 +41,13 @@ export function Testbed() {
   const [inputVolumeLevel, setInputVolumeLevel] = useState(0.0);
   const [outputVolumeLevel, setOutputVolumeLevel] = useState(0.0);
   const micMode = Platform.OS === "ios" ? getMicrophoneModeIOS() : "NO_MIC_MODE_IN_ANDROID";
+  
+  // Log sample rate information
+  useEffect(() => {
+    console.log("AudioEngine configured with dual sample rates:");
+    console.log("  Input (microphone): 16kHz");
+    console.log("  Output (speaker): 24kHz with automatic resampling");
+  }, []);
 
   const playAudio = () => {
     for (const dataChunk of audioData) {

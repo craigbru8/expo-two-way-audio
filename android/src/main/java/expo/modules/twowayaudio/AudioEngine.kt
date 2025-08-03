@@ -21,7 +21,8 @@ import kotlin.math.pow
 
 
 class AudioEngine (context: Context) {
-    private val SAMPLE_RATE = 16000
+    private val INPUT_SAMPLE_RATE = 16000
+    private val OUTPUT_SAMPLE_RATE = 24000
     private val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     private val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
 
@@ -45,6 +46,7 @@ class AudioEngine (context: Context) {
     var onInputVolumeCallback: ((Float) -> Unit)? = null
     var onOutputVolumeCallback: ((Float) -> Unit)? = null
     var onAudioInterruptionCallback: ((String) -> Unit)? = null
+    var onRawAudioLevelCallback: ((Float) -> Unit)? = null
 
     init {
         initializeAudio(context)
@@ -52,6 +54,7 @@ class AudioEngine (context: Context) {
 
     @SuppressLint("NewApi")
     private fun initializeAudio(context:Context) {
+        Log.d("AudioEngine", "Initializing with dual sample rates: Input=${INPUT_SAMPLE_RATE}Hz, Output=${OUTPUT_SAMPLE_RATE}Hz")
         audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         requestAudioFocus()
@@ -73,11 +76,13 @@ class AudioEngine (context: Context) {
             }
         }, null)
 
-        val bufferSize = AudioTrack.getMinBufferSize(
-            SAMPLE_RATE,
+        val minBufferSize = AudioTrack.getMinBufferSize(
+            OUTPUT_SAMPLE_RATE,
             AudioFormat.CHANNEL_OUT_MONO,
             AUDIO_FORMAT
         )
+        // Use 2x minimum buffer size for better performance while maintaining low latency
+        val bufferSize = minBufferSize * 2
 
         audioTrack = AudioTrack(
             AudioAttributes.Builder()
@@ -86,7 +91,7 @@ class AudioEngine (context: Context) {
                 .build(),
             AudioFormat.Builder()
                 .setEncoding(AUDIO_FORMAT)
-                .setSampleRate(SAMPLE_RATE)
+                .setSampleRate(OUTPUT_SAMPLE_RATE)
                 .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                 .build(),
             bufferSize,
@@ -152,8 +157,22 @@ class AudioEngine (context: Context) {
                 .setOnAudioFocusChangeListener { focusChange ->
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS -> {
-                            Log.d("AudioEngine", "Audio focus lost")
-                            onAudioInterruptionCallback?.let { it("blocked") }
+                            Log.d("AudioEngine", "Audio focus lost - stopping recording and playback")
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                pauseRecordingAndPlayer()
+                            }
+                            onAudioInterruptionCallback?.invoke("began")
+                        }
+                        AudioManager.AUDIOFOCUS_GAIN -> {
+                            Log.d("AudioEngine", "Audio focus gained - resuming")
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                resumeRecordingAndPlayer()
+                            }
+                            onAudioInterruptionCallback?.invoke("ended")
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                            Log.d("AudioEngine", "Audio focus lost temporarily")
+                            onAudioInterruptionCallback?.invoke("blocked")
                         }
                     }
                 }
@@ -170,10 +189,12 @@ class AudioEngine (context: Context) {
     @RequiresApi(Build.VERSION_CODES.Q)
     @SuppressLint("MissingPermission")
     private fun startRecording(){
-        val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+        val minBufferSize = AudioRecord.getMinBufferSize(INPUT_SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+        // Use 2x minimum buffer size for better performance while maintaining low latency
+        val bufferSize = minBufferSize * 2
         audioRecord = AudioRecord(
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            SAMPLE_RATE,
+            INPUT_SAMPLE_RATE,
             CHANNEL_CONFIG,
             AUDIO_FORMAT,
             bufferSize
@@ -206,6 +227,7 @@ class AudioEngine (context: Context) {
 
     private fun startMicSampleTap(){
         executorServiceMicrophone.execute {
+            // Buffer size for ~32ms at 16kHz (1024 bytes = 512 samples = 32ms at 16kHz) - optimized for real-time AI
             val buffer = ByteArray(1024)
             try {
                 while (isRecording) {
@@ -214,6 +236,11 @@ class AudioEngine (context: Context) {
                         val data = buffer.copyOf(read)
                         val micVolume = calculateRMSLevel(data)
                         onInputVolumeCallback?.invoke(micVolume)
+                        
+                        // Calculate raw audio level for VAD
+                        val rawLevel = calculateRawAudioLevel(data)
+                        onRawAudioLevelCallback?.invoke(rawLevel)
+                        
                         onMicDataCallback?.invoke(data)
                     }
                 }
@@ -252,10 +279,52 @@ class AudioEngine (context: Context) {
     }
 
     fun playPCMData(data: ByteArray) {
-        audioSampleQueue.add(data)
+        // Convert incoming audio data to output sample rate if needed
+        val convertedData = resampleAudio(data, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
+        audioSampleQueue.add(convertedData)
         if (!isPlaying) {
             playAudioFromSampleQueue()
         }
+    }
+    
+    private fun resampleAudio(inputData: ByteArray, inputSampleRate: Int, outputSampleRate: Int): ByteArray {
+        if (inputSampleRate == outputSampleRate) {
+            return inputData
+        }
+        
+        // Convert ByteArray to ShortArray for processing
+        val inputSamples = ShortArray(inputData.size / 2)
+        for (i in inputSamples.indices) {
+            inputSamples[i] = (inputData[i * 2].toInt() or (inputData[i * 2 + 1].toInt() shl 8)).toShort()
+        }
+        
+        // Simple linear interpolation resampling
+        val ratio = outputSampleRate.toDouble() / inputSampleRate.toDouble()
+        val outputLength = (inputSamples.size * ratio).toInt()
+        val outputSamples = ShortArray(outputLength)
+        
+        for (i in outputSamples.indices) {
+            val inputIndex = i / ratio
+            val index = inputIndex.toInt()
+            
+            if (index < inputSamples.size - 1) {
+                val fraction = inputIndex - index
+                val sample1 = inputSamples[index].toDouble()
+                val sample2 = inputSamples[index + 1].toDouble()
+                outputSamples[i] = (sample1 + fraction * (sample2 - sample1)).toInt().toShort()
+            } else if (index < inputSamples.size) {
+                outputSamples[i] = inputSamples[index]
+            }
+        }
+        
+        // Convert back to ByteArray
+        val outputData = ByteArray(outputSamples.size * 2)
+        for (i in outputSamples.indices) {
+            outputData[i * 2] = (outputSamples[i].toInt() and 0xFF).toByte()
+            outputData[i * 2 + 1] = ((outputSamples[i].toInt() shr 8) and 0xFF).toByte()
+        }
+        
+        return outputData
     }
 
     private fun playAudioFromSampleQueue() {
@@ -310,6 +379,13 @@ class AudioEngine (context: Context) {
         audioTrack.play()
     }
 
+    fun clearAudioQueue() {
+        audioSampleQueue.clear()
+        isPlaying = false
+        onOutputVolumeCallback?.invoke(0.0f)
+        Log.d("AudioEngine", "Audio queue cleared")
+    }
+
     @SuppressLint("NewApi")
     fun tearDown() {
         stopRecording()
@@ -353,6 +429,20 @@ class AudioEngine (context: Context) {
         val adjustedValue = normalizedValue.pow(expFactor)
 
         return adjustedValue
+    }
+    
+    private fun calculateRawAudioLevel(buffer: ByteArray): Float {
+        var rawLevel = 0f
+        val sampleCount = buffer.size / 2
+        
+        for (i in 0 until sampleCount) {
+            // Combine two bytes into a 16-bit signed integer
+            val sample = (buffer[i * 2].toInt() or (buffer[i * 2 + 1].toInt() shl 8)).toShort()
+            // Normalize to -1.0 to 1.0 range and get absolute value
+            rawLevel += kotlin.math.abs(sample / 32768.0f)
+        }
+        
+        return rawLevel / sampleCount
     }
 
 }

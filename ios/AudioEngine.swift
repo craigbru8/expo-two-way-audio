@@ -8,13 +8,15 @@ class AudioEngine {
     private var sessionInterruptionObserver: Any?
     private var mediaServicesResetObserver: Any?
     
-    public private(set) var voiceIOFormat: AVAudioFormat
+    public private(set) var inputFormat: AVAudioFormat
+    public private(set) var outputFormat: AVAudioFormat
     public private(set) var isRecording = false
     
     public var onMicDataCallback: ((Data) -> Void)?
     public var onInputVolumeCallback: ((Float) -> Void)?
     public var onOutputVolumeCallback: ((Float) -> Void)?
     public var onAudioInterruptionCallback: ((String) -> Void)?
+    public var onRawAudioLevelCallback: ((Float) -> Void)?
     
     private var inputLevelTimer: Timer?
     private var outputLevelTimer: Timer?
@@ -35,11 +37,15 @@ class AudioEngine {
     init() throws {
         avAudioEngine.attach(speechPlayer)
         
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1) else {
+        guard let inputFmt = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1),
+              let outputFmt = AVAudioFormat(standardFormatWithSampleRate: 24000, channels: 1) else {
             throw AudioEngineError.audioFormatError
         }
-        voiceIOFormat = format
-        print("Voice IO format: \(String(describing: voiceIOFormat))")
+        inputFormat = inputFmt
+        outputFormat = outputFmt
+        print("AudioEngine initialized with dual sample rates:")
+        print("  Input format: \(String(describing: inputFormat))")
+        print("  Output format: \(String(describing: outputFormat))")
         
         engineConfigChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -81,15 +87,29 @@ class AudioEngine {
         let session = AVAudioSession.sharedInstance()
         
         do {
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP])
+            // Optimized for real-time AI conversation
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [
+                .defaultToSpeaker, 
+                .allowBluetooth, 
+                .allowBluetoothA2DP,
+                .mixWithOthers // Allow mixing with other audio if needed
+            ])
         } catch {
             print("Could not set the audio category: \(error.localizedDescription)")
         }
         
         do {
-            try session.setPreferredSampleRate(voiceIOFormat.sampleRate)
+            // Set preferred sample rate to the higher of the two formats for better quality
+            try session.setPreferredSampleRate(max(inputFormat.sampleRate, outputFormat.sampleRate))
         } catch {
             print("Could not set the preferred sample rate: \(error.localizedDescription)")
+        }
+        
+        do {
+            // Set preferred buffer duration for low latency (32ms)
+            try session.setPreferredIOBufferDuration(0.032)
+        } catch {
+            print("Could not set the preferred IO buffer duration: \(error.localizedDescription)")
         }
         
         do {
@@ -113,10 +133,14 @@ class AudioEngine {
         let output = avAudioEngine.outputNode
         let mainMixer = avAudioEngine.mainMixerNode
         
-        avAudioEngine.connect(speechPlayer, to: mainMixer, format: voiceIOFormat)
-        avAudioEngine.connect(mainMixer, to: output, format: voiceIOFormat)
+        // Connect speech player to mixer with output format (24kHz)
+        avAudioEngine.connect(speechPlayer, to: mainMixer, format: outputFormat)
+        // Connect mixer to output with output format (24kHz)
+        avAudioEngine.connect(mainMixer, to: output, format: outputFormat)
         
-        input.installTap(onBus: 0, bufferSize: 2048, format: voiceIOFormat) { [weak self] buffer, when in
+        // Install tap on input with input format (16kHz)
+        // Buffer size 512 samples = ~32ms at 16kHz (optimized for real-time AI)
+        input.installTap(onBus: 0, bufferSize: 512, format: inputFormat) { [weak self] buffer, when in
             // We don't do any input processing (no volume calculation or passing mic data to the callback) if discardRecording == true
             // See comment in the playPCMData function
             if self?.isRecording == true && self?.discardRecording == false {
@@ -125,7 +149,9 @@ class AudioEngine {
             }
         }
         
-        mainMixer.installTap(onBus: 0, bufferSize: 2048, format: voiceIOFormat) { [weak self] buffer, when in
+        // Install tap on mixer with output format (24kHz)
+        // Buffer size 768 samples = ~32ms at 24kHz (maintains same latency as input)
+        mainMixer.installTap(onBus: 0, bufferSize: 768, format: outputFormat) { [weak self] buffer, when in
             self?.processOutputBuffer(buffer)
             self?.updateOutputVolume()
         }
@@ -143,13 +169,20 @@ class AudioEngine {
         var int16Samples = [Int16](repeating: 0, count: frameCount)
         
         // Convert float samples to Int16 and update input buffer for volume calculation
+        var rawLevel: Float = 0.0
         for i in 0..<frameCount {
             let floatSample = max(-1.0, min(1.0, channelData[i]))
             int16Samples[i] = Int16(floatSample * Float(Int16.max))
             
             inputBuffer[inputBufferIndex] = floatSample
             inputBufferIndex = (inputBufferIndex + 1) % inputBuffer.count
+            
+            // Calculate raw audio level for VAD
+            rawLevel += abs(floatSample)
         }
+        
+        // Send raw audio level for potential VAD implementation
+        onRawAudioLevelCallback?(rawLevel / Float(frameCount))
         
         // Create Data object from Int16 samples
         let data = Data(bytes: int16Samples, count: frameCount * MemoryLayout<Int16>.size)
@@ -211,12 +244,8 @@ class AudioEngine {
     private func createBuffer(from data: Data) -> AVAudioPCMBuffer? {
         let frameCount = UInt32(data.count) / 2 // 16-bit input = 2 bytes per frame
         
-        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-                                   sampleRate: 16000,
-                                   channels: 1,
-                                   interleaved: false)!
-        
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+        // Create buffer with output format (24kHz) for playback
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else {
             return nil
         }
         
@@ -285,6 +314,14 @@ class AudioEngine {
         return speechPlayer.isPlaying
     }
     
+    func clearAudioQueue() {
+        speechPlayer.stop()
+        // Reset output buffer for clean volume reporting
+        outputBuffer = [Float](repeating: 0, count: outputBuffer.count)
+        updateOutputVolume()
+        print("Audio queue cleared")
+    }
+    
     private func checkEngineIsRunning() {
         if !avAudioEngine.isRunning {
             start()
@@ -298,22 +335,27 @@ class AudioEngine {
 
         switch type {
         case .began:
+            print("Audio session interrupted - stopping recording and playback")
             self.stopRecordingAndPlayer()
             onAudioInterruptionCallback?("began")
         case .ended:
             if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
                 let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
                 if options.contains(.shouldResume) {
-                    // Interruption ended. Resume playback.
-                    self.resumeRecordingAndPlayer()
+                    print("Audio session interruption ended - resuming")
+                    // Add small delay to ensure audio session is ready
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        self.resumeRecordingAndPlayer()
+                    }
                     onAudioInterruptionCallback?("ended")
                 } else {
-                    // Interruption ends. Don't resume playback.
+                    print("Audio session interruption ended - not resuming")
                     onAudioInterruptionCallback?("blocked")
                 }
             }
         @unknown default:
-            fatalError("Unknown type: \(type)")
+            print("Unknown audio interruption type: \(type)")
+            onAudioInterruptionCallback?("unknown")
         }
     }
     

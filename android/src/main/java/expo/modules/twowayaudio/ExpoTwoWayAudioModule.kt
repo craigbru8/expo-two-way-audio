@@ -70,6 +70,10 @@ class ExpoTwoWayAudioModule : Module() {
              audioEngine?.isPlaying ?: false
          }
 
+         Function("clearAudioQueue") {
+             audioEngine?.clearAudioQueue()
+         }
+
         Function("getMicrophoneModeIOS") {
             throw UnsupportedOperationException("getMicrophoneModeIOS is only supported on iOS")
         }
@@ -120,6 +124,10 @@ class ExpoTwoWayAudioModule : Module() {
                 sendEvent(ON_RECORDING_CHANGE_EVENT, bundleOf(
                     "data" to (audioEngine?.isRecording ?: false)
                 ))
+            }
+            onRawAudioLevelCallback = { level ->
+                // Raw audio level can be used for VAD implementation
+                // Currently not exposed as event, but available for future use
             }
         }
     }

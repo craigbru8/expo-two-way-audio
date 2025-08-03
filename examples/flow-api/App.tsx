@@ -169,7 +169,7 @@ export function FlowTest() {
           audioFormat: {
             type: "raw",
             encoding: "pcm_s16le", // this can also be set to 'pcm_f32le' for 32-bit Float
-            sample_rate: 16000,
+            sample_rate: 16000, // Input sample rate - output will be automatically resampled to 24kHz
           },
         });
         setIsConnectedToFlow(true);

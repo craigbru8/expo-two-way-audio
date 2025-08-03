@@ -6,7 +6,7 @@ The aim of the module is to facilitate creating real-time conversational apps. T
 
 - Request audio recording permissions
 - Get clean (applying Acoustic Echo Cancelling) microphone samples in PCM format (1 channel 16 bit at 16kHz)
-- Play audio samples in PCM format (1 channel 16 bit at 16kHz). Playback happens through main speaker unless external audio sources are connected.
+- Play audio samples in PCM format (1 channel 16 bit). Input audio is automatically resampled to 24kHz for playback. Playback happens through main speaker unless external audio sources are connected.
 - Provide volume level both for the input and output samples. Float between 0 and 1.
 - [iOS only] Get microphone mode and prompt user to select a microphone mode.
 
@@ -79,6 +79,14 @@ Please check out our [examples/](./examples) to get full sample code.
 ## Notes
 
 Some audio features of expo-two-way-audio like Acoustic Echo Cancelling, noise reduction or microphone modes (iOS) don't work on simulator. Run the example on a real device to test these features.
+
+### Dual Sample Rate Configuration
+
+This module uses different sample rates for input and output to optimize for both AEC performance and audio quality:
+- **Input (Microphone)**: 16kHz - Optimized for voice processing and AEC
+- **Output (Speaker)**: 24kHz - Higher quality playback with automatic resampling
+
+The different sample rates help maintain low latency while providing better acoustic echo cancellation performance.
 
 ```bash
 # iOS

@@ -117,6 +117,10 @@ public class ExpoTwoWayAudioModule: Module {
         Function("isPlaying") { () -> Bool in
             return self.audioEngine?.isPlaying ?? false
         }
+        
+        Function("clearAudioQueue") {
+            self.audioEngine?.clearAudioQueue()
+        }
 
         AsyncFunction("getMicrophonePermissionsAsync") { (promise: Promise) in
             EXPermissionsMethodsDelegate.getPermissionWithPermissionsManager(
