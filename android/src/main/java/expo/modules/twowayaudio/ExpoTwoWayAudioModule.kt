@@ -14,6 +14,7 @@ class ExpoTwoWayAudioModule : Module() {
         private const val ON_OUTPUT_VOLUME_LEVEL_EVENT = "onOutputVolumeLevelData"
         private const val ON_RECORDING_CHANGE_EVENT = "onRecordingChange"
         private const val ON_AUDIO_INTERRUPTION_EVENT = "onAudioInterruption"
+        private const val ON_RAW_AUDIO_LEVEL_EVENT = "onRawAudioLevel"
         var audioEngine: AudioEngine? = null
     }
 
@@ -104,7 +105,8 @@ class ExpoTwoWayAudioModule : Module() {
             ON_INPUT_VOLUME_LEVEL_EVENT,
             ON_OUTPUT_VOLUME_LEVEL_EVENT,
             ON_RECORDING_CHANGE_EVENT,
-            ON_AUDIO_INTERRUPTION_EVENT
+            ON_AUDIO_INTERRUPTION_EVENT,
+            ON_RAW_AUDIO_LEVEL_EVENT
         )
     }
 
@@ -126,8 +128,7 @@ class ExpoTwoWayAudioModule : Module() {
                 ))
             }
             onRawAudioLevelCallback = { level ->
-                // Raw audio level can be used for VAD implementation
-                // Currently not exposed as event, but available for future use
+                sendEvent(ON_RAW_AUDIO_LEVEL_EVENT, bundleOf("data" to level))
             }
         }
     }
