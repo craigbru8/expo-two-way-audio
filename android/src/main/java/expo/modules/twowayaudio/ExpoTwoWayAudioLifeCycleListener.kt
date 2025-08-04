@@ -6,13 +6,13 @@ import expo.modules.core.interfaces.ReactActivityLifecycleListener
 class ExpoTwoWayAudioLifeCycleListener : ReactActivityLifecycleListener {
     override fun onPause(activity: Activity?) {
         super.onPause(activity)
-        // At the moment background audio recording and playback is not supported
+        // Pause recording when app goes to background - user must manually restart
         ExpoTwoWayAudioModule.audioEngine?.pauseRecordingAndPlayer()
     }
 
     override fun onResume(activity: Activity?) {
         super.onResume(activity)
-        // At the moment background audio recording and playback is not supported
-        ExpoTwoWayAudioModule.audioEngine?.resumeRecordingAndPlayer()
+        // Do NOT auto-resume recording - user must manually restart via app UI
+        // This ensures microphone only starts through explicit user action
     }
 }

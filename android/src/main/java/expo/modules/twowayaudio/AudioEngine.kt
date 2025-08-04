@@ -164,14 +164,11 @@ class AudioEngine (context: Context) {
                             onAudioInterruptionCallback?.invoke("began")
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
-                            Log.d("AudioEngine", "Audio focus gained - resuming")
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                resumeRecordingAndPlayer()
-                            }
+                            Log.d("AudioEngine", "Audio focus gained - NOT auto-resuming (user must manually restart)")
                             onAudioInterruptionCallback?.invoke("ended")
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                            Log.d("AudioEngine", "Audio focus lost temporarily")
+                            Log.d("AudioEngine", "Audio focus lost temporarily - NOT auto-resuming")
                             onAudioInterruptionCallback?.invoke("blocked")
                         }
                     }

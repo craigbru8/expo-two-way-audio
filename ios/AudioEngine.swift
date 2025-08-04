@@ -91,8 +91,8 @@ class AudioEngine {
             try session.setCategory(.playAndRecord, mode: .voiceChat, options: [
                 .defaultToSpeaker, 
                 .allowBluetooth, 
-                .allowBluetoothA2DP,
-                .mixWithOthers // Allow mixing with other audio if needed
+                .allowBluetoothA2DP
+                // Removed .mixWithOthers to prevent other apps from interfering
             ])
         } catch {
             print("Could not set the audio category: \(error.localizedDescription)")
@@ -339,20 +339,8 @@ class AudioEngine {
             self.stopRecordingAndPlayer()
             onAudioInterruptionCallback?("began")
         case .ended:
-            if let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt {
-                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-                if options.contains(.shouldResume) {
-                    print("Audio session interruption ended - resuming")
-                    // Add small delay to ensure audio session is ready
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        self.resumeRecordingAndPlayer()
-                    }
-                    onAudioInterruptionCallback?("ended")
-                } else {
-                    print("Audio session interruption ended - not resuming")
-                    onAudioInterruptionCallback?("blocked")
-                }
-            }
+            print("Audio session interruption ended - NOT auto-resuming (user must manually restart)")
+            onAudioInterruptionCallback?("ended")
         @unknown default:
             print("Unknown audio interruption type: \(type)")
             onAudioInterruptionCallback?("unknown")
