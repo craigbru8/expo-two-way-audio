@@ -76,6 +76,54 @@ Please check out our [examples/](./examples) to get full sample code.
    toggleRecording(true);
    ```
 
+## Background Audio Handling
+
+This module is designed for **conversational AI applications** and follows best practices for background audio:
+
+### Why No Background Audio Capability?
+
+Unlike music or podcast apps, conversational AI requires:
+- **Bidirectional real-time processing** - Both recording and playback simultaneously
+- **Voice processing features** - Acoustic Echo Cancellation (AEC) and noise suppression
+- **Active user engagement** - Voice conversations naturally pause when users switch apps
+
+**Background audio doesn't work reliably for these use cases** because:
+- Voice processing (AEC/noise cancellation) gets disabled in background
+- Real-time audio processing becomes unreliable
+- Input taps may stop working
+- It doesn't fit Apple's intended background audio model
+
+### Recommended Approach ✅
+
+The module automatically handles interruptions gracefully:
+
+```jsx
+// Listen for audio interruptions
+useExpoTwoWayAudioEventListener(
+  "onAudioInterruption",
+  useCallback((event) => {
+    switch (event.data) {
+      case "began":
+        // Conversation paused - show user feedback
+        showNotification("🎙️ Conversation paused");
+        break;
+      case "ended":
+        // Show re-engagement prompt
+        showNotification("🔔 Tap to continue your conversation");
+        break;
+    }
+  }, []),
+);
+```
+
+**What happens when app goes to background:**
+1. Audio session interruption is detected
+2. Recording and playback are gracefully stopped
+3. Audio queue is cleared to prevent confusion
+4. User must manually restart the conversation
+
+This provides a **better user experience** than pretending background audio works when it doesn't.
+
 ## Notes
 
 Some audio features of expo-two-way-audio like Acoustic Echo Cancelling, noise reduction or microphone modes (iOS) don't work on simulator. Run the example on a real device to test these features.

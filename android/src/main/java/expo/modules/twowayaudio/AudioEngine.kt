@@ -157,18 +157,22 @@ class AudioEngine (context: Context) {
                 .setOnAudioFocusChangeListener { focusChange ->
                     when (focusChange) {
                         AudioManager.AUDIOFOCUS_LOSS -> {
-                            Log.d("AudioEngine", "Audio focus lost - stopping recording and playback")
+                            Log.d("AudioEngine", "Audio focus lost - gracefully pausing conversation")
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                pauseRecordingAndPlayer()
+                                pauseConversation()
                             }
                             onAudioInterruptionCallback?.invoke("began")
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
-                            Log.d("AudioEngine", "Audio focus gained - NOT auto-resuming (user must manually restart)")
+                            Log.d("AudioEngine", "Audio focus gained - showing re-engagement notification")
+                            scheduleReEngagementNotification()
                             onAudioInterruptionCallback?.invoke("ended")
                         }
                         AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                            Log.d("AudioEngine", "Audio focus lost temporarily - NOT auto-resuming")
+                            Log.d("AudioEngine", "Audio focus lost temporarily - conversation paused")
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                pauseConversation()
+                            }
                             onAudioInterruptionCallback?.invoke("blocked")
                         }
                     }
@@ -330,6 +334,22 @@ class AudioEngine (context: Context) {
         isRecording = toggleRecording(false)
         audioTrack.pause()
     }
+    
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun pauseConversation() {
+        // Gracefully pause the conversation
+        Log.d("AudioEngine", "Pausing conversation due to interruption")
+        pauseRecordingAndPlayer()
+        // Clear any pending audio to avoid confusion when resuming
+        clearAudioQueue()
+    }
+    
+    private fun scheduleReEngagementNotification() {
+        // This would typically trigger a local notification or UI update
+        // The actual notification scheduling should be handled by the React Native layer
+        Log.d("AudioEngine", "Conversation paused - user should be notified to re-engage")
+        // The onAudioInterruptionCallback will inform the JS layer to handle UI updates
+    }
 
     @RequiresApi(Build.VERSION_CODES.Q)
     fun resumeRecordingAndPlayer() {
@@ -358,6 +378,13 @@ class AudioEngine (context: Context) {
         }
         executorServiceMicrophone.shutdownNow()
     }
+
+    // Background Audio Approach for Conversational AI:
+    // This implementation follows best practices by:
+    // 1. Not using background audio capability - bidirectional voice processing doesn't work reliably in background
+    // 2. Gracefully pausing conversations when interrupted - clears audio state and notifies user
+    // 3. Requiring manual resume - users must explicitly restart conversations for better UX
+    // 4. Following Android's audio focus guidelines - proper focus management without auto-resume
 
 
     private fun calculateRMSLevel(buffer: ByteArray): Float {

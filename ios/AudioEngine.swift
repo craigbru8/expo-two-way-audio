@@ -294,6 +294,13 @@ class AudioEngine {
         updateOutputVolume()
     }
     
+    // MARK: - Background Audio Approach
+    // This implementation follows the recommended approach for conversational AI:
+    // 1. No background audio capability - conversations pause when app backgrounds
+    // 2. Graceful interruption handling - clear audio state and notify user
+    // 3. Manual resume only - users must explicitly restart conversations
+    // 4. Better UX - matches user expectations for voice conversations
+    
     func resumeRecordingAndPlayer(){
         do {
             try AVAudioSession.sharedInstance().setActive(true)
@@ -335,16 +342,32 @@ class AudioEngine {
 
         switch type {
         case .began:
-            print("Audio session interrupted - stopping recording and playback")
-            self.stopRecordingAndPlayer()
+            print("Audio session interrupted - gracefully pausing conversation")
+            pauseConversation()
             onAudioInterruptionCallback?("began")
         case .ended:
-            print("Audio session interruption ended - NOT auto-resuming (user must manually restart)")
+            print("Audio session interruption ended - showing re-engagement notification")
+            scheduleReEngagementNotification()
             onAudioInterruptionCallback?("ended")
         @unknown default:
             print("Unknown audio interruption type: \(type)")
             onAudioInterruptionCallback?("unknown")
         }
+    }
+    
+    private func pauseConversation() {
+        // Gracefully pause the conversation
+        print("Pausing conversation due to interruption")
+        self.stopRecordingAndPlayer()
+        // Clear any pending audio to avoid confusion when resuming
+        clearAudioQueue()
+    }
+    
+    private func scheduleReEngagementNotification() {
+        // This would typically trigger a local notification or UI update
+        // The actual notification scheduling should be handled by the React Native layer
+        print("Conversation paused - user should be notified to re-engage")
+        // The onAudioInterruptionCallback will inform the JS layer to handle UI updates
     }
     
     private func handleMediaServicesWereReset() {

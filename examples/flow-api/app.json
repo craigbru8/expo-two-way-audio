@@ -15,7 +15,6 @@
       "supportsTablet": false,
       "bundleIdentifier": "expo.modules.twowayaudio.flow.example",
       "infoPlist": {
-        "UIBackgroundModes": ["audio"],
         "NSMicrophoneUsageDescription": "Allow Speechmatics to access your microphone"
       }
     },
