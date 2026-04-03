@@ -1,6 +1,6 @@
 {
   "name": "@speechmatics/expo-two-way-audio",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Native module for two way audio streaming",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -34,7 +34,6 @@
   },
   "peerDependencies": {
     "expo": ">=52.0.0",
-    "expo-modules-core": "*",
     "react": "*",
     "react-native": "*"
   }
