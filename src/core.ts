@@ -1,8 +1,12 @@
 import { type PermissionResponse, createPermissionHook } from "expo-modules-core";
 import ExpoTwoWayAudioModule from "./ExpoTwoWayAudioModule";
 
-export async function initialize() {
-  return await ExpoTwoWayAudioModule.initialize();
+export async function initialize(): Promise<void> {
+  await ExpoTwoWayAudioModule.initialize();
+}
+
+export function isInitialized(): boolean {
+  return ExpoTwoWayAudioModule.isInitialized();
 }
 
 export function playPCMData(audioData: Uint8Array) {

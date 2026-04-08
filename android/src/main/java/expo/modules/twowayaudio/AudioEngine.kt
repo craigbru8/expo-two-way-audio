@@ -13,9 +13,10 @@ import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
-import java.util.LinkedList
 import java.util.Queue
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
+import kotlin.jvm.Volatile
 import kotlin.math.pow
 
 
@@ -30,7 +31,7 @@ class AudioEngine (context: Context) {
     private lateinit var audioManager: AudioManager
     private lateinit var audioTrack: AudioTrack
     private var audioFocusRequest: AudioFocusRequest? = null
-    private val audioSampleQueue: Queue<ByteArray> = LinkedList()
+    private val audioSampleQueue: Queue<ByteArray> = ConcurrentLinkedQueue()
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
     private val executorServiceMicrophone = Executors.newFixedThreadPool(1)
@@ -38,10 +39,14 @@ class AudioEngine (context: Context) {
     private var speakerDevice: AudioDeviceInfo? = null
 
     /** True only while [initializeAudio] completed; false after [tearDown]. */
+    @Volatile
     private var isEngineReady = false
 
+    @Volatile
     var isRecording = false
     private var isRecordingBeforePause = false
+
+    @Volatile
     var isPlaying = false
 
     var onMicDataCallback: ((ByteArray) -> Unit)? = null
@@ -49,6 +54,7 @@ class AudioEngine (context: Context) {
     var onOutputVolumeCallback: ((Float) -> Unit)? = null
     var onAudioInterruptionCallback: ((String) -> Unit)? = null
     var onRawAudioLevelCallback: ((Float) -> Unit)? = null
+    var onErrorCallback: ((String, String) -> Unit)? = null
 
     init {
         initializeAudio(context)
@@ -244,11 +250,10 @@ class AudioEngine (context: Context) {
                     }
                 }
                 Log.d("AudioEngine", "Mic sample tap stopped.")
-            }catch (e: Exception){
+            } catch (e: Exception) {
                 Log.e("AudioEngine", "Error reading mic sample data", e)
                 isRecording = false
-                tearDown()
-                throw e
+                onErrorCallback?.invoke("MIC_READ", e.message ?: e.toString())
             }
         }
     }
@@ -305,10 +310,11 @@ class AudioEngine (context: Context) {
                         break
                     }
                 }
-            }catch (e: Exception){
+            } catch (e: Exception) {
                 Log.e("AudioEngine", "Error playing audio", e)
                 e.printStackTrace()
-            }finally {
+                onErrorCallback?.invoke("PLAYBACK", e.message ?: e.toString())
+            } finally {
                 isPlaying = false
                 onOutputVolumeCallback?.invoke(0.0F)
             }
@@ -385,12 +391,20 @@ class AudioEngine (context: Context) {
     fun tearDown() {
         isEngineReady = false
         stopRecording()
+        audioSampleQueue.clear()
+        isPlaying = false
+        onOutputVolumeCallback?.invoke(0.0f)
         if (::audioTrack.isInitialized) {
             try {
                 audioTrack.stop()
             } catch (e: Exception) {
                 Log.w("AudioEngine", "audioTrack.stop in tearDown", e)
             }
+        }
+        try {
+            executorServicePlayback.shutdownNow()
+        } catch (e: Exception) {
+            Log.w("AudioEngine", "executorServicePlayback.shutdownNow", e)
         }
         audioManager.mode = AudioManager.MODE_NORMAL
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -399,7 +413,11 @@ class AudioEngine (context: Context) {
         audioFocusRequest?.let { request ->
             audioManager.abandonAudioFocusRequest(request)
         }
-        executorServiceMicrophone.shutdownNow()
+        try {
+            executorServiceMicrophone.shutdownNow()
+        } catch (e: Exception) {
+            Log.w("AudioEngine", "executorServiceMicrophone.shutdownNow", e)
+        }
     }
 
     private fun calculateRMSLevel(buffer: ByteArray): Float {

@@ -7,6 +7,7 @@ class AudioEngine {
     private var engineConfigChangeObserver: Any?
     private var sessionInterruptionObserver: Any?
     private var mediaServicesResetObserver: Any?
+    private var routeChangeObserver: Any?
     
     public private(set) var inputFormat: AVAudioFormat
     public private(set) var outputFormat: AVAudioFormat
@@ -17,6 +18,8 @@ class AudioEngine {
     public var onOutputVolumeCallback: ((Float) -> Void)?
     public var onAudioInterruptionCallback: ((String) -> Void)?
     public var onRawAudioLevelCallback: ((Float) -> Void)?
+    public var onErrorCallback: ((String, String) -> Void)?
+    public var onAudioRouteChangeCallback: ((String) -> Void)?
     
     private var inputLevelTimer: Timer?
     private var outputLevelTimer: Timer?
@@ -65,6 +68,12 @@ class AudioEngine {
             queue: .main) { [weak self] _ in
                 self?.handleMediaServicesWereReset()
             }
+        routeChangeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main) { [weak self] notification in
+                self?.handleRouteChange(notification)
+            }
         
         self.setupAudioSession()
         self.setup()
@@ -81,6 +90,35 @@ class AudioEngine {
         if let observer = mediaServicesResetObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = routeChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+    
+    private func emitError(code: String, message: String) {
+        onErrorCallback?(code, message)
+    }
+    
+    private func handleRouteChange(_ notification: Notification) {
+        guard let info = notification.userInfo,
+              let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
+            return
+        }
+        let reasonStr: String
+        switch reason {
+        case .newDeviceAvailable: reasonStr = "newDeviceAvailable"
+        case .oldDeviceUnavailable: reasonStr = "oldDeviceUnavailable"
+        case .categoryChange: reasonStr = "categoryChange"
+        case .override: reasonStr = "override"
+        case .wakeFromSleep: reasonStr = "wakeFromSleep"
+        case .noSuitableRouteForCategory: reasonStr = "noSuitableRouteForCategory"
+        case .routeConfigurationChange: reasonStr = "routeConfigurationChange"
+        @unknown default:
+            reasonStr = "other(\(reasonValue))"
+        }
+        onAudioRouteChangeCallback?(reasonStr)
+        checkEngineIsRunning()
     }
     
     func setupAudioSession() {
@@ -96,6 +134,7 @@ class AudioEngine {
             ])
         } catch {
             print("Could not set the audio category: \(error.localizedDescription)")
+            emitError("AUDIO_SESSION", "setCategory: \(error.localizedDescription)")
         }
         
         do {
@@ -103,6 +142,7 @@ class AudioEngine {
             try session.setPreferredSampleRate(max(inputFormat.sampleRate, outputFormat.sampleRate))
         } catch {
             print("Could not set the preferred sample rate: \(error.localizedDescription)")
+            emitError("AUDIO_SESSION", "setPreferredSampleRate: \(error.localizedDescription)")
         }
         
         do {
@@ -110,12 +150,14 @@ class AudioEngine {
             try session.setPreferredIOBufferDuration(0.032)
         } catch {
             print("Could not set the preferred IO buffer duration: \(error.localizedDescription)")
+            emitError("AUDIO_SESSION", "setPreferredIOBufferDuration: \(error.localizedDescription)")
         }
         
         do {
             try session.setActive(true)
         } catch {
             print("Could not set the audio session as active")
+            emitError("AUDIO_SESSION", "setActive(true) failed")
         }
     }
     
@@ -125,6 +167,7 @@ class AudioEngine {
             try input.setVoiceProcessingEnabled(true)
         } catch {
             print("Could not enable voice processing \(error)")
+            emitError("VOICE_PROCESSING", error.localizedDescription)
             return
         }
         
@@ -162,6 +205,7 @@ class AudioEngine {
     func processMicrophoneBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else {
             print("Error: Could not access channel data")
+            emitError("MIC_PIPELINE", "Could not access microphone channel data")
             return
         }
         
@@ -194,6 +238,7 @@ class AudioEngine {
     func processOutputBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else {
             print("Error: Could not access channel data")
+            emitError("OUTPUT_PIPELINE", "Could not access output channel data")
             return
         }
         
@@ -212,6 +257,7 @@ class AudioEngine {
             try avAudioEngine.start()
         } catch {
             print("Could not start audio engine: \(error)")
+            emitError("ENGINE_START", error.localizedDescription)
         }
     }
     
@@ -231,6 +277,7 @@ class AudioEngine {
         
         guard let buffer = createBuffer(from: pcmData) else {
             print("Failed to create audio buffer")
+            emitError("PLAYBACK", "Failed to create audio buffer")
             return
         }
         speechPlayer.scheduleBuffer(buffer)

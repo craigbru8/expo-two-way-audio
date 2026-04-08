@@ -15,6 +15,8 @@ class ExpoTwoWayAudioModule : Module() {
         private const val ON_RECORDING_CHANGE_EVENT = "onRecordingChange"
         private const val ON_AUDIO_INTERRUPTION_EVENT = "onAudioInterruption"
         private const val ON_RAW_AUDIO_LEVEL_EVENT = "onRawAudioLevel"
+        private const val ON_ERROR_EVENT = "onError"
+        private const val ON_AUDIO_ROUTE_CHANGE_EVENT = "onAudioRouteChange"
         var audioEngine: AudioEngine? = null
     }
 
@@ -23,16 +25,40 @@ class ExpoTwoWayAudioModule : Module() {
         AsyncFunction("initialize") { promise: Promise ->
             try {
                 if (audioEngine != null) {
-                    promise.resolve(true)
+                    promise.resolve(null)
                     return@AsyncFunction
                 }
-                audioEngine = appContext.reactContext?.let { AudioEngine(it) }
+                val ctx = appContext.reactContext
+                if (ctx == null) {
+                    sendEvent(
+                        ON_ERROR_EVENT,
+                        bundleOf("code" to "INIT_FAILED", "message" to "React context is null")
+                    )
+                    promise.reject("INIT_FAILED", "React context is null", null)
+                    return@AsyncFunction
+                }
+                audioEngine = AudioEngine(ctx)
                 setupCallbacks()
-                promise.resolve(true)
+                promise.resolve(null)
             } catch (e: Exception) {
-                promise.resolve(false)
+                sendEvent(
+                    ON_ERROR_EVENT,
+                    bundleOf(
+                        "code" to "INIT_FAILED",
+                        "message" to (e.message ?: e.toString())
+                    )
+                )
+                promise.reject(
+                    "INIT_FAILED",
+                    e.message ?: e.toString(),
+                    e
+                )
             }
         }
+
+         Function("isInitialized") {
+             audioEngine != null
+         }
 
          Function("isRecording") {
              audioEngine?.isRecording ?: false
@@ -106,7 +132,9 @@ class ExpoTwoWayAudioModule : Module() {
             ON_OUTPUT_VOLUME_LEVEL_EVENT,
             ON_RECORDING_CHANGE_EVENT,
             ON_AUDIO_INTERRUPTION_EVENT,
-            ON_RAW_AUDIO_LEVEL_EVENT
+            ON_RAW_AUDIO_LEVEL_EVENT,
+            ON_ERROR_EVENT,
+            ON_AUDIO_ROUTE_CHANGE_EVENT
         )
     }
 
@@ -129,6 +157,9 @@ class ExpoTwoWayAudioModule : Module() {
             }
             onRawAudioLevelCallback = { level ->
                 sendEvent(ON_RAW_AUDIO_LEVEL_EVENT, bundleOf("data" to level))
+            }
+            onErrorCallback = { code, message ->
+                sendEvent(ON_ERROR_EVENT, bundleOf("code" to code, "message" to message))
             }
         }
     }

@@ -6,6 +6,8 @@ let ON_OUTPUT_VOLUME_LEVEL_EVENT_NAME = "onOutputVolumeLevelData"
 let ON_RECORDING_CHANGE_EVENT_NAME = "onRecordingChange"
 let ON_AUDIO_INTERRUPTION_EVENT_NAME = "onAudioInterruption"
 let ON_RAW_AUDIO_LEVEL_EVENT_NAME = "onRawAudioLevel"
+let ON_ERROR_EVENT_NAME = "onError"
+let ON_AUDIO_ROUTE_CHANGE_EVENT_NAME = "onAudioRouteChange"
 
 public class ExpoTwoWayAudioModule: Module {
     private var audioEngine: AudioEngine?
@@ -23,10 +25,15 @@ public class ExpoTwoWayAudioModule: Module {
 
         }
 
-        AsyncFunction("initialize") { () -> Bool in
+        Function("isInitialized") { () -> Bool in
+            return self.audioEngine != nil
+        }
+
+        AsyncFunction("initialize") { (promise: Promise) in
             do {
                 if self.audioEngine != nil {
-                    return true
+                    promise.resolve(nil)
+                    return
                 }
                 self.audioEngine = try AudioEngine()
                 self.setupMicrophoneCallback()
@@ -34,10 +41,20 @@ public class ExpoTwoWayAudioModule: Module {
                 self.setupOutputAudioLevelCallback()
                 self.setupAudioInterruptionCallback()
                 self.setupRawAudioLevelCallback()
-                return true
+                self.setupErrorAndRouteCallbacks()
+                promise.resolve(nil)
             } catch {
                 print("Failed to initialize AudioEngine: \(error)")
-                return false
+                self.sendEvent(
+                    ON_ERROR_EVENT_NAME,
+                    [
+                        "code": "INIT_FAILED",
+                        "message": "Failed to initialize AudioEngine: \(error.localizedDescription)"
+                    ])
+                promise.reject(
+                    "INIT_FAILED",
+                    "Failed to initialize AudioEngine: \(error.localizedDescription)"
+                )
             }
         }
 
@@ -150,6 +167,8 @@ public class ExpoTwoWayAudioModule: Module {
             ON_RECORDING_CHANGE_EVENT_NAME,
             ON_AUDIO_INTERRUPTION_EVENT_NAME,
             ON_RAW_AUDIO_LEVEL_EVENT_NAME,
+            ON_ERROR_EVENT_NAME,
+            ON_AUDIO_ROUTE_CHANGE_EVENT_NAME,
         ])
     }
 
@@ -204,6 +223,24 @@ public class ExpoTwoWayAudioModule: Module {
                 ON_RAW_AUDIO_LEVEL_EVENT_NAME,
                 [
                     "data": level
+                ])
+        }
+    }
+
+    private func setupErrorAndRouteCallbacks() {
+        audioEngine?.onErrorCallback = { [weak self] code, message in
+            self?.sendEvent(
+                ON_ERROR_EVENT_NAME,
+                [
+                    "code": code,
+                    "message": message
+                ])
+        }
+        audioEngine?.onAudioRouteChangeCallback = { [weak self] reason in
+            self?.sendEvent(
+                ON_AUDIO_ROUTE_CHANGE_EVENT_NAME,
+                [
+                    "data": reason
                 ])
         }
     }
