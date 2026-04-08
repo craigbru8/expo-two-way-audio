@@ -11,7 +11,6 @@ import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
-import android.os.PowerManager
 import android.util.Log
 import androidx.annotation.RequiresApi
 import java.util.LinkedList
@@ -26,7 +25,8 @@ class AudioEngine (context: Context) {
     private val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
     private val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
 
-    private lateinit var audioRecord: AudioRecord
+    /** Null until [startRecording]; avoids [kotlin.UninitializedPropertyAccessException] in pause/teardown races. */
+    private var audioRecord: AudioRecord? = null
     private lateinit var audioManager: AudioManager
     private lateinit var audioTrack: AudioTrack
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -37,11 +37,13 @@ class AudioEngine (context: Context) {
     private val executorServicePlayback = Executors.newFixedThreadPool(1)
     private var speakerDevice: AudioDeviceInfo? = null
 
+    /** True only while [initializeAudio] completed; false after [tearDown]. */
+    private var isEngineReady = false
+
     var isRecording = false
     private var isRecordingBeforePause = false
     var isPlaying = false
 
-    // Callbacks
     var onMicDataCallback: ((ByteArray) -> Unit)? = null
     var onInputVolumeCallback: ((Float) -> Unit)? = null
     var onOutputVolumeCallback: ((Float) -> Unit)? = null
@@ -59,10 +61,8 @@ class AudioEngine (context: Context) {
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
         requestAudioFocus()
 
-        // Route audio to external device if connected, otherwise route to speaker
         updateAudioRouting()
 
-        // Listen for changes in audio routing
         audioManager.registerAudioDeviceCallback(object:android.media.AudioDeviceCallback(){
             override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
                 Log.d("AudioEngine", "onAudioDevicesAdded")
@@ -81,7 +81,6 @@ class AudioEngine (context: Context) {
             AudioFormat.CHANNEL_OUT_MONO,
             AUDIO_FORMAT
         )
-        // Use 2x minimum buffer size for better performance while maintaining low latency
         val bufferSize = minBufferSize * 2
 
         audioTrack = AudioTrack(
@@ -100,6 +99,7 @@ class AudioEngine (context: Context) {
         ).apply {
             play()
         }
+        isEngineReady = true
     }
 
     private fun updateAudioRouting() {
@@ -124,7 +124,6 @@ class AudioEngine (context: Context) {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // Use the modern API for Android S and above
             try {
                 selectedDevice?.let {
                     audioManager.setCommunicationDevice(it)
@@ -137,7 +136,6 @@ class AudioEngine (context: Context) {
             }
 
         } else {
-            // Fall back to deprecated method for older Android versions
             @Suppress("DEPRECATION")
             audioManager.isSpeakerphoneOn = !isExternalDeviceConnected
         }
@@ -191,22 +189,23 @@ class AudioEngine (context: Context) {
     @SuppressLint("MissingPermission")
     private fun startRecording(){
         val minBufferSize = AudioRecord.getMinBufferSize(INPUT_SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
-        // Use 2x minimum buffer size for better performance while maintaining low latency
         val bufferSize = minBufferSize * 2
-        audioRecord = AudioRecord(
+        val record = AudioRecord(
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             INPUT_SAMPLE_RATE,
             CHANNEL_CONFIG,
             AUDIO_FORMAT,
             bufferSize
         )
+        audioRecord = record
 
-        if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            audioRecord = null
             throw RuntimeException("Audio Record can't initialize!")
         }
 
         if (AcousticEchoCanceler.isAvailable()){
-            echoCanceler = AcousticEchoCanceler.create(audioRecord.audioSessionId)
+            echoCanceler = AcousticEchoCanceler.create(record.audioSessionId)
             if (echoCanceler != null) {
                 echoCanceler?.enabled = true
                 Log.i("AudioEngine", "Echo Canceler enabled")
@@ -214,34 +213,33 @@ class AudioEngine (context: Context) {
         }
 
         if (NoiseSuppressor.isAvailable()){
-            noiseSuppressor = NoiseSuppressor.create(audioRecord.audioSessionId)
+            noiseSuppressor = NoiseSuppressor.create(record.audioSessionId)
             if (noiseSuppressor != null) {
                 noiseSuppressor?.enabled = true
                 Log.i("AudioEngine", "Noise Suppressor enabled")
             }
         }
 
-        audioRecord.startRecording()
+        record.startRecording()
         isRecording = true
         startMicSampleTap()
     }
 
     private fun startMicSampleTap(){
         executorServiceMicrophone.execute {
-            // Buffer size for ~32ms at 16kHz (1024 bytes = 512 samples = 32ms at 16kHz) - optimized for real-time AI
             val buffer = ByteArray(1024)
             try {
                 while (isRecording) {
-                    val read = audioRecord.read(buffer, 0, buffer.size)
+                    val rec = audioRecord ?: break
+                    val read = rec.read(buffer, 0, buffer.size)
                     if (read > 0) {
                         val data = buffer.copyOf(read)
                         val micVolume = calculateRMSLevel(data)
                         onInputVolumeCallback?.invoke(micVolume)
-                        
-                        // Calculate raw audio level for VAD
+
                         val rawLevel = calculateRawAudioLevel(data)
                         onRawAudioLevelCallback?.invoke(rawLevel)
-                        
+
                         onMicDataCallback?.invoke(data)
                     }
                 }
@@ -258,10 +256,13 @@ class AudioEngine (context: Context) {
     private fun stopRecording() {
         if (!isRecording) return
         isRecording = false
-        if (audioRecord.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-            audioRecord.stop()
-            audioRecord.release()
+        audioRecord?.let { record ->
+            if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                record.stop()
+            }
+            record.release()
         }
+        audioRecord = null
         onInputVolumeCallback?.invoke(0.0F)
     }
 
@@ -280,15 +281,15 @@ class AudioEngine (context: Context) {
     }
 
     fun playPCMData(data: ByteArray) {
-        // Assume incoming audio is 24kHz (matches output sample rate) - no resampling needed
-        // This is optimal for Gemini Live and other 24kHz audio sources
+        if (!isEngineReady || !::audioTrack.isInitialized) {
+            Log.w("AudioEngine", "playPCMData ignored: engine not ready")
+            return
+        }
         audioSampleQueue.add(data)
         if (!isPlaying) {
             playAudioFromSampleQueue()
         }
     }
-    
-
 
     private fun playAudioFromSampleQueue() {
         executorServicePlayback.execute{
@@ -315,6 +316,7 @@ class AudioEngine (context: Context) {
     }
 
     private fun playSample(data: ByteArray) {
+        if (!::audioTrack.isInitialized) return
         audioTrack.write(data, 0, data.size)
     }
 
@@ -330,35 +332,49 @@ class AudioEngine (context: Context) {
 
     @RequiresApi(Build.VERSION_CODES.Q)
     fun pauseRecordingAndPlayer() {
-        isRecordingBeforePause = isRecording
-        isRecording = toggleRecording(false)
-        audioTrack.pause()
+        if (!isEngineReady) {
+            Log.w("AudioEngine", "pauseRecordingAndPlayer: engine not ready, skipping")
+            return
+        }
+        try {
+            isRecordingBeforePause = isRecording
+            isRecording = toggleRecording(false)
+            if (::audioTrack.isInitialized) {
+                audioTrack.pause()
+            }
+        } catch (e: Exception) {
+            Log.w("AudioEngine", "pauseRecordingAndPlayer failed safely", e)
+        }
     }
-    
+
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun pauseConversation() {
-        // Gracefully pause the conversation
         Log.d("AudioEngine", "Pausing conversation due to interruption")
         pauseRecordingAndPlayer()
-        // Clear any pending audio to avoid confusion when resuming
         clearAudioQueue()
     }
-    
+
     private fun scheduleReEngagementNotification() {
-        // This would typically trigger a local notification or UI update
-        // The actual notification scheduling should be handled by the React Native layer
         Log.d("AudioEngine", "Conversation paused - user should be notified to re-engage")
-        // The onAudioInterruptionCallback will inform the JS layer to handle UI updates
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
     fun resumeRecordingAndPlayer() {
-        requestAudioFocus()
-        isRecording = toggleRecording(isRecordingBeforePause)
-        audioTrack.play()
+        if (!isEngineReady || !::audioTrack.isInitialized) {
+            Log.w("AudioEngine", "resumeRecordingAndPlayer: engine not ready")
+            return
+        }
+        try {
+            requestAudioFocus()
+            isRecording = toggleRecording(isRecordingBeforePause)
+            audioTrack.play()
+        } catch (e: Exception) {
+            Log.w("AudioEngine", "resumeRecordingAndPlayer failed", e)
+        }
     }
 
     fun clearAudioQueue() {
+        if (!isEngineReady) return
         audioSampleQueue.clear()
         isPlaying = false
         onOutputVolumeCallback?.invoke(0.0f)
@@ -367,8 +383,15 @@ class AudioEngine (context: Context) {
 
     @SuppressLint("NewApi")
     fun tearDown() {
+        isEngineReady = false
         stopRecording()
-        audioTrack.stop()
+        if (::audioTrack.isInitialized) {
+            try {
+                audioTrack.stop()
+            } catch (e: Exception) {
+                Log.w("AudioEngine", "audioTrack.stop in tearDown", e)
+            }
+        }
         audioManager.mode = AudioManager.MODE_NORMAL
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             audioManager.clearCommunicationDevice()
@@ -379,55 +402,37 @@ class AudioEngine (context: Context) {
         executorServiceMicrophone.shutdownNow()
     }
 
-    // Background Audio Approach for Conversational AI:
-    // This implementation follows best practices by:
-    // 1. Not using background audio capability - bidirectional voice processing doesn't work reliably in background
-    // 2. Gracefully pausing conversations when interrupted - clears audio state and notifies user
-    // 3. Requiring manual resume - users must explicitly restart conversations for better UX
-    // 4. Following Android's audio focus guidelines - proper focus management without auto-resume
-
-
     private fun calculateRMSLevel(buffer: ByteArray): Float {
-        val epsilon = 1e-5f // To avoid log(0)
+        val epsilon = 1e-5f
 
-        // Convert ByteArray to FloatArray by treating each pair of bytes as a single 16-bit PCM sample
         val floatBuffer = FloatArray(buffer.size / 2)
         for (i in floatBuffer.indices) {
-            // Combine two bytes into a 16-bit signed integer
             val sample = (buffer[i * 2].toInt() or (buffer[i * 2 + 1].toInt() shl 8)).toShort()
-            // Normalize sample to -1.0 to 1.0 range for FloatArray
             floatBuffer[i] = sample / 32768.0f
         }
 
-        // Calculate RMS value
         val rmsValue = kotlin.math.sqrt(floatBuffer.fold(0f) { acc, sample -> acc + sample * sample } / floatBuffer.size)
 
-        // Convert to decibels
         val dbValue = 20 * kotlin.math.log10(maxOf(rmsValue, epsilon))
 
-        // Normalize decibel value to 0-1 range
-        // Assuming minimum audible is -80dB and maximum is 0dB
         val minDb = -80.0f
         val normalizedValue = maxOf(0.0f, minOf(1.0f, (dbValue - minDb) / kotlin.math.abs(minDb)))
 
-        // Optional: Apply exponential factor to push smaller values down
-        val expFactor = 2.0f // Adjust this value to change the curve
+        val expFactor = 2.0f
         val adjustedValue = normalizedValue.pow(expFactor)
 
         return adjustedValue
     }
-    
+
     private fun calculateRawAudioLevel(buffer: ByteArray): Float {
         var rawLevel = 0f
         val sampleCount = buffer.size / 2
-        
+
         for (i in 0 until sampleCount) {
-            // Combine two bytes into a 16-bit signed integer
             val sample = (buffer[i * 2].toInt() or (buffer[i * 2 + 1].toInt() shl 8)).toShort()
-            // Normalize to -1.0 to 1.0 range and get absolute value
             rawLevel += kotlin.math.abs(sample / 32768.0f)
         }
-        
+
         return rawLevel / sampleCount
     }
 
