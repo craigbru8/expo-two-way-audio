@@ -178,8 +178,8 @@ class AudioEngine {
         
         // Connect speech player to mixer with output format (24kHz)
         avAudioEngine.connect(speechPlayer, to: mainMixer, format: outputFormat)
-        // Connect mixer to output with output format (24kHz)
-        avAudioEngine.connect(mainMixer, to: output, format: outputFormat)
+        // Let the engine negotiate the hardware format for the final hop
+        avAudioEngine.connect(mainMixer, to: output, format: nil)
         
         // Install tap on input with input format (16kHz)
         // Buffer size 512 samples = ~32ms at 16kHz (optimized for real-time AI)
