@@ -134,7 +134,7 @@ class AudioEngine {
             ])
         } catch {
             print("Could not set the audio category: \(error.localizedDescription)")
-            emitError("AUDIO_SESSION", "setCategory: \(error.localizedDescription)")
+            emitError(code: "AUDIO_SESSION", message: "setCategory: \(error.localizedDescription)")
         }
         
         do {
@@ -142,7 +142,7 @@ class AudioEngine {
             try session.setPreferredSampleRate(max(inputFormat.sampleRate, outputFormat.sampleRate))
         } catch {
             print("Could not set the preferred sample rate: \(error.localizedDescription)")
-            emitError("AUDIO_SESSION", "setPreferredSampleRate: \(error.localizedDescription)")
+            emitError(code: "AUDIO_SESSION", message: "setPreferredSampleRate: \(error.localizedDescription)")
         }
         
         do {
@@ -150,14 +150,14 @@ class AudioEngine {
             try session.setPreferredIOBufferDuration(0.032)
         } catch {
             print("Could not set the preferred IO buffer duration: \(error.localizedDescription)")
-            emitError("AUDIO_SESSION", "setPreferredIOBufferDuration: \(error.localizedDescription)")
+            emitError(code: "AUDIO_SESSION", message: "setPreferredIOBufferDuration: \(error.localizedDescription)")
         }
         
         do {
             try session.setActive(true)
         } catch {
             print("Could not set the audio session as active")
-            emitError("AUDIO_SESSION", "setActive(true) failed")
+            emitError(code: "AUDIO_SESSION", message: "setActive(true) failed")
         }
     }
     
@@ -167,7 +167,7 @@ class AudioEngine {
             try input.setVoiceProcessingEnabled(true)
         } catch {
             print("Could not enable voice processing \(error)")
-            emitError("VOICE_PROCESSING", error.localizedDescription)
+            emitError(code: "VOICE_PROCESSING", message: error.localizedDescription)
             return
         }
         
@@ -205,7 +205,7 @@ class AudioEngine {
     func processMicrophoneBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else {
             print("Error: Could not access channel data")
-            emitError("MIC_PIPELINE", "Could not access microphone channel data")
+            emitError(code: "MIC_PIPELINE", message: "Could not access microphone channel data")
             return
         }
         
@@ -238,7 +238,7 @@ class AudioEngine {
     func processOutputBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else {
             print("Error: Could not access channel data")
-            emitError("OUTPUT_PIPELINE", "Could not access output channel data")
+            emitError(code: "OUTPUT_PIPELINE", message: "Could not access output channel data")
             return
         }
         
@@ -257,7 +257,7 @@ class AudioEngine {
             try avAudioEngine.start()
         } catch {
             print("Could not start audio engine: \(error)")
-            emitError("ENGINE_START", error.localizedDescription)
+            emitError(code: "ENGINE_START", message: error.localizedDescription)
         }
     }
     
@@ -277,7 +277,7 @@ class AudioEngine {
         
         guard let buffer = createBuffer(from: pcmData) else {
             print("Failed to create audio buffer")
-            emitError("PLAYBACK", "Failed to create audio buffer")
+            emitError(code: "PLAYBACK", message: "Failed to create audio buffer")
             return
         }
         speechPlayer.scheduleBuffer(buffer)

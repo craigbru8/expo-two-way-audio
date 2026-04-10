@@ -1,8 +1,8 @@
 import { Buffer } from "buffer";
 import {
+  AudioInterruptionCallback,
   MicrophoneDataCallback,
   VolumeLevelCallback,
-  AudioInterruptionCallback,
   getMicrophoneModeIOS,
   initialize,
   playPCMData,
@@ -42,7 +42,7 @@ export function Testbed() {
   const [inputVolumeLevel, setInputVolumeLevel] = useState(0.0);
   const [outputVolumeLevel, setOutputVolumeLevel] = useState(0.0);
   const micMode = Platform.OS === "ios" ? getMicrophoneModeIOS() : "NO_MIC_MODE_IN_ANDROID";
-  
+
   // Log sample rate information
   useEffect(() => {
     console.log("AudioEngine configured with dual sample rates:");
@@ -89,7 +89,7 @@ export function Testbed() {
     useCallback((event) => {
       const interruptionType = event.data;
       console.log(`Audio interruption: ${interruptionType}`);
-      
+
       switch (interruptionType) {
         case "began":
           // Conversation was gracefully paused due to interruption

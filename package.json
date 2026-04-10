@@ -1,6 +1,6 @@
 {
   "name": "@speechmatics/expo-two-way-audio",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "description": "Native module for two way audio streaming",
   "main": "build/index.js",
   "types": "build/index.d.ts",
@@ -14,6 +14,7 @@
     "typecheck": "tsc",
     "prepare": "expo-module prepare",
     "prepublishOnly": "expo-module prepublishOnly",
+    "check:release-version": "node ./scripts/check-release-version.js",
     "expo-module": "expo-module",
     "open:ios": "xed examples/basic-usage/ios",
     "open:android": "open -a \"Android Studio\" examples/basic-usage/android"

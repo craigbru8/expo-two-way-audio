@@ -11,17 +11,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: ⬇️ Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: ⎔ Get Node Version
         id: node_version
         run: echo "NVMRC=$(cat .nvmrc)" >> $GITHUB_OUTPUT
 
       - name: ⎔ Setup Node
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: "${{ steps.node_version.outputs.NVMRC }}"
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            examples/basic-usage/package-lock.json
 
       - name: 📦 Install Dependencies
         run: npm ci
@@ -34,3 +37,37 @@ jobs:
 
       - name: 🧪 Typecheck
         run: npm run typecheck
+
+  ios-smoke:
+    runs-on: macos-latest
+    steps:
+      - name: ⬇️ Checkout
+        uses: actions/checkout@v4
+
+      - name: ⎔ Get Node Version
+        id: node_version
+        run: echo "NVMRC=$(cat .nvmrc)" >> $GITHUB_OUTPUT
+
+      - name: ⎔ Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "${{ steps.node_version.outputs.NVMRC }}"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            examples/basic-usage/package-lock.json
+
+      - name: 📦 Install Root Dependencies
+        run: npm ci
+
+      - name: 📦 Install Example Dependencies
+        working-directory: examples/basic-usage
+        run: npm ci
+
+      - name: 🏗️ Prebuild iOS Example
+        working-directory: examples/basic-usage
+        run: npx expo prebuild --platform ios --clean --non-interactive
+
+      - name: 🧪 Compile iOS Example
+        working-directory: examples/basic-usage
+        run: xcodebuild -workspace ios/expo-two-way-audio-example.xcworkspace -scheme expo-two-way-audio-example -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build

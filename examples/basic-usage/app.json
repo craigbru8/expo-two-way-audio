@@ -23,10 +23,7 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
-      "permissions": [
-        "RECORD_AUDIO",
-        "MODIFY_AUDIO_SETTINGS"
-      ],
+      "permissions": ["RECORD_AUDIO", "MODIFY_AUDIO_SETTINGS"],
       "package": "expo.modules.twowayaudio.example"
     },
     "web": {
