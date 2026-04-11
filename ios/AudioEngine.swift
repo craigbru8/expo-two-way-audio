@@ -40,6 +40,7 @@ class AudioEngine {
         case audioFormatError
         case voiceProcessingFailed(String)
         case inputFormatUnavailable
+        case outputTapFormatUnavailable
 
         var errorDescription: String? {
             switch self {
@@ -49,6 +50,8 @@ class AudioEngine {
                 return "Voice processing setup failed: \(detail)"
             case .inputFormatUnavailable:
                 return "Input node has no valid format (sampleRate or channelCount is 0)"
+            case .outputTapFormatUnavailable:
+                return "Main mixer has no valid output format for tap installation"
             }
         }
     }
@@ -91,9 +94,14 @@ class AudioEngine {
                 self?.handleRouteChange(notification)
             }
         
-        self.setupAudioSession()
-        try self.setup()
-        self.start()
+        do {
+            self.setupAudioSession()
+            try self.setup()
+            self.start()
+        } catch {
+            self.cleanupAfterFailedInitialization()
+            throw error
+        }
     }
     
     deinit {
@@ -121,6 +129,20 @@ class AudioEngine {
     
     private func emitError(code: String, message: String) {
         onErrorCallback?(code, message)
+    }
+
+    private func cleanupAfterFailedInitialization() {
+        inputConverter = nil
+        speechPlayer.stop()
+        avAudioEngine.inputNode.removeTap(onBus: 0)
+        avAudioEngine.mainMixerNode.removeTap(onBus: 0)
+        avAudioEngine.stop()
+
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("Could not deactivate audio session after failed initialization: \(error)")
+        }
     }
     
     private func handleRouteChange(_ notification: Notification) {
@@ -222,8 +244,10 @@ class AudioEngine {
             inputConverter = AVAudioConverter(from: nativeFormat, to: inputFormat)
         }
         
-        let nativeBufSize = AVAudioFrameCount(512.0 * nativeFormat.sampleRate / inputFormat.sampleRate)
-        
+        let nativeBufSize = AVAudioFrameCount(
+            max(1, Int(ceil(512.0 * nativeFormat.sampleRate / inputFormat.sampleRate)))
+        )
+
         input.installTap(onBus: 0, bufferSize: nativeBufSize, format: nativeFormat) { [weak self] buffer, _ in
             guard let self = self, self.isRecording, !self.discardRecording else { return }
             if let converter = self.inputConverter {
@@ -235,8 +259,17 @@ class AudioEngine {
             }
             self.updateInputVolume()
         }
-        
-        mainMixer.installTap(onBus: 0, bufferSize: 768, format: outputFormat) { [weak self] buffer, _ in
+
+        let mixerTapFormat = mainMixer.outputFormat(forBus: 0)
+        guard mixerTapFormat.sampleRate > 0, mixerTapFormat.channelCount > 0 else {
+            throw AudioEngineError.outputTapFormatUnavailable
+        }
+
+        let mixerTapBufferSize = AVAudioFrameCount(
+            max(1, Int(ceil(768.0 * mixerTapFormat.sampleRate / outputFormat.sampleRate)))
+        )
+
+        mainMixer.installTap(onBus: 0, bufferSize: mixerTapBufferSize, format: mixerTapFormat) { [weak self] buffer, _ in
             self?.processOutputBuffer(buffer)
             self?.updateOutputVolume()
         }
