@@ -33,6 +33,8 @@ class AudioEngine {
     private var discardRecording = false
     private var discardFirstInputMillis = 2000
     
+    private var isTornDown = false
+    
     enum AudioEngineError: Error {
         case audioFormatError
     }
@@ -81,17 +83,25 @@ class AudioEngine {
     }
     
     deinit {
+        removeObservers()
+    }
+    
+    private func removeObservers() {
         if let observer = engineConfigChangeObserver {
             NotificationCenter.default.removeObserver(observer)
+            engineConfigChangeObserver = nil
         }
         if let observer = sessionInterruptionObserver {
             NotificationCenter.default.removeObserver(observer)
+            sessionInterruptionObserver = nil
         }
         if let observer = mediaServicesResetObserver {
             NotificationCenter.default.removeObserver(observer)
+            mediaServicesResetObserver = nil
         }
         if let observer = routeChangeObserver {
             NotificationCenter.default.removeObserver(observer)
+            routeChangeObserver = nil
         }
     }
     
@@ -100,6 +110,8 @@ class AudioEngine {
     }
     
     private func handleRouteChange(_ notification: Notification) {
+        guard !isTornDown else { return }
+        
         guard let info = notification.userInfo,
               let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
@@ -125,12 +137,10 @@ class AudioEngine {
         let session = AVAudioSession.sharedInstance()
         
         do {
-            // Optimized for real-time AI conversation
             try session.setCategory(.playAndRecord, mode: .voiceChat, options: [
                 .defaultToSpeaker, 
                 .allowBluetooth, 
                 .allowBluetoothA2DP
-                // Removed .mixWithOthers to prevent other apps from interfering
             ])
         } catch {
             print("Could not set the audio category: \(error.localizedDescription)")
@@ -138,7 +148,6 @@ class AudioEngine {
         }
         
         do {
-            // Set preferred sample rate to the higher of the two formats for better quality
             try session.setPreferredSampleRate(max(inputFormat.sampleRate, outputFormat.sampleRate))
         } catch {
             print("Could not set the preferred sample rate: \(error.localizedDescription)")
@@ -146,7 +155,6 @@ class AudioEngine {
         }
         
         do {
-            // Set preferred buffer duration for low latency (32ms)
             try session.setPreferredIOBufferDuration(0.032)
         } catch {
             print("Could not set the preferred IO buffer duration: \(error.localizedDescription)")
@@ -176,24 +184,16 @@ class AudioEngine {
         let output = avAudioEngine.outputNode
         let mainMixer = avAudioEngine.mainMixerNode
         
-        // Connect speech player to mixer with output format (24kHz)
         avAudioEngine.connect(speechPlayer, to: mainMixer, format: outputFormat)
-        // Let the engine negotiate the hardware format for the final hop
         avAudioEngine.connect(mainMixer, to: output, format: nil)
         
-        // Install tap on input with input format (16kHz)
-        // Buffer size 512 samples = ~32ms at 16kHz (optimized for real-time AI)
         input.installTap(onBus: 0, bufferSize: 512, format: inputFormat) { [weak self] buffer, when in
-            // We don't do any input processing (no volume calculation or passing mic data to the callback) if discardRecording == true
-            // See comment in the playPCMData function
             if self?.isRecording == true && self?.discardRecording == false {
                 self?.processMicrophoneBuffer(buffer)
                 self?.updateInputVolume()
             }
         }
         
-        // Install tap on mixer with output format (24kHz)
-        // Buffer size 768 samples = ~32ms at 24kHz (maintains same latency as input)
         mainMixer.installTap(onBus: 0, bufferSize: 768, format: outputFormat) { [weak self] buffer, when in
             self?.processOutputBuffer(buffer)
             self?.updateOutputVolume()
@@ -212,7 +212,6 @@ class AudioEngine {
         let frameCount = Int(buffer.frameLength)
         var int16Samples = [Int16](repeating: 0, count: frameCount)
         
-        // Convert float samples to Int16 and update input buffer for volume calculation
         var rawLevel: Float = 0.0
         for i in 0..<frameCount {
             let floatSample = max(-1.0, min(1.0, channelData[i]))
@@ -221,17 +220,13 @@ class AudioEngine {
             inputBuffer[inputBufferIndex] = floatSample
             inputBufferIndex = (inputBufferIndex + 1) % inputBuffer.count
             
-            // Calculate raw audio level for VAD
             rawLevel += abs(floatSample)
         }
         
-        // Send raw audio level for potential VAD implementation
         onRawAudioLevelCallback?(rawLevel / Float(frameCount))
         
-        // Create Data object from Int16 samples
         let data = Data(bytes: int16Samples, count: frameCount * MemoryLayout<Int16>.size)
         
-        // Send the data to the callback
         onMicDataCallback?(data)
     }
     
@@ -244,7 +239,6 @@ class AudioEngine {
         
         let frameCount = Int(buffer.frameLength)
         
-        // Update output buffer for volume calculation
         for i in 0..<frameCount {
             let floatSample = max(-1.0, min(1.0, channelData[i]))
             outputBuffer[outputBufferIndex] = floatSample
@@ -253,6 +247,7 @@ class AudioEngine {
     }
     
     func start() {
+        guard !isTornDown else { return }
         do {
             try avAudioEngine.start()
         } catch {
@@ -262,11 +257,8 @@ class AudioEngine {
     }
     
     func playPCMData(_ pcmData: Data) {
-        // Looks like we don't get a proper AEC for the very first chunks of audio that we play.
-        // To work around this, we will discard microphone input for the first few milliseconds.
-        // This will give the AEC time to adapt to the playback audio.
-        // We achieve this by setting discardRecording to true for a short time (this doesn't actually mute the input). It's just not processed in the tap.
-        // Audio that is not processed by the input tap is not sent to the callback and therefore not sent to the server.
+        guard !isTornDown else { return }
+        
         if !hasFirstInputBeenDiscarded {
             self.hasFirstInputBeenDiscarded = true
             self.discardRecording = true
@@ -289,9 +281,8 @@ class AudioEngine {
 
     
     private func createBuffer(from data: Data) -> AVAudioPCMBuffer? {
-        let frameCount = UInt32(data.count) / 2 // 16-bit input = 2 bytes per frame
+        let frameCount = UInt32(data.count) / 2
         
-        // Create buffer with output format (24kHz) - assume input data is also 24kHz
         guard let buffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else {
             return nil
         }
@@ -316,10 +307,10 @@ class AudioEngine {
     }
     
     func toggleRecording(_ val: Bool) -> Bool {
+        guard !isTornDown else { return false }
         isRecording = val
         if !isRecording {
             avAudioEngine.inputNode.isVoiceProcessingInputMuted = true
-            // Reset input buffer, so that volume levels report 0
             inputBuffer = [Float](repeating: 0, count: 2048)
             updateInputVolume()
         } else {
@@ -349,6 +340,7 @@ class AudioEngine {
     // 4. Better UX - matches user expectations for voice conversations
     
     func resumeRecordingAndPlayer(){
+        guard !isTornDown else { return }
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
@@ -360,8 +352,22 @@ class AudioEngine {
     }
     
     func tearDown() {
-        stopRecordingAndPlayer()
+        isTornDown = true
+        removeObservers()
+
+        let wasRecording = isRecording
+        if wasRecording {
+            isRecording = false
+            avAudioEngine.inputNode.isVoiceProcessingInputMuted = true
+        }
+        speechPlayer.stop()
         avAudioEngine.stop()
+
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        } catch {
+            print("Could not deactivate audio session during teardown: \(error)")
+        }
     }
     
     var isPlaying: Bool {
@@ -370,19 +376,21 @@ class AudioEngine {
     
     func clearAudioQueue() {
         speechPlayer.stop()
-        // Reset output buffer for clean volume reporting
         outputBuffer = [Float](repeating: 0, count: outputBuffer.count)
         updateOutputVolume()
         print("Audio queue cleared")
     }
     
     private func checkEngineIsRunning() {
+        guard !isTornDown else { return }
         if !avAudioEngine.isRunning {
             start()
         }
     }
     
     private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard !isTornDown else { return }
+        
         guard let userInfo = notification.userInfo,
               let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
@@ -403,21 +411,17 @@ class AudioEngine {
     }
     
     private func pauseConversation() {
-        // Gracefully pause the conversation
         print("Pausing conversation due to interruption")
         self.stopRecordingAndPlayer()
-        // Clear any pending audio to avoid confusion when resuming
         clearAudioQueue()
     }
     
     private func scheduleReEngagementNotification() {
-        // This would typically trigger a local notification or UI update
-        // The actual notification scheduling should be handled by the React Native layer
         print("Conversation paused - user should be notified to re-engage")
-        // The onAudioInterruptionCallback will inform the JS layer to handle UI updates
     }
     
     private func handleMediaServicesWereReset() {
+        guard !isTornDown else { return }
         self.avAudioEngine.stop()
         self.setup()
         self.start()
@@ -434,19 +438,15 @@ class AudioEngine {
     }
     
     private func calculateRMSLevel(from buffer: [Float]) -> Float {
-        let epsilon: Float = 1e-5 // To avoid log(0)
+        let epsilon: Float = 1e-5
         let rmsValue = sqrt(buffer.reduce(0) { $0 + $1 * $1 } / Float(buffer.count))
         
-        // Convert to decibels
         let dbValue = 20 * log10(max(rmsValue, epsilon))
         
-        // Normalize decibel value to 0-1 range
-        // Assuming minimum audible is -60dB and maximum is 0dB
         let minDb: Float = -80.0
         let normalizedValue = max(0.0, min(1.0, (dbValue - minDb) / abs(minDb)))
         
-        // Optional: Apply exponential factor to push smaller values down
-        let expFactor: Float = 2.0 // Adjust this value to change the curve
+        let expFactor: Float = 2.0
         let adjustedValue = pow(normalizedValue, expFactor)
         
         return adjustedValue
