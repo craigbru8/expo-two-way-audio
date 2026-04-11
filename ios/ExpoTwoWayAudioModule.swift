@@ -11,6 +11,8 @@ let ON_AUDIO_ROUTE_CHANGE_EVENT_NAME = "onAudioRouteChange"
 
 public class ExpoTwoWayAudioModule: Module {
     private var audioEngine: AudioEngine?
+    private let engineLock = NSLock()
+
     public func definition() -> ModuleDefinition {
         Name("ExpoTwoWayAudio")
 
@@ -30,12 +32,17 @@ public class ExpoTwoWayAudioModule: Module {
         }
 
         AsyncFunction("initialize") { (promise: Promise) in
+            self.engineLock.lock()
+            if self.audioEngine != nil {
+                self.engineLock.unlock()
+                promise.resolve(nil)
+                return
+            }
+
             do {
-                if self.audioEngine != nil {
-                    promise.resolve(nil)
-                    return
-                }
-                self.audioEngine = try AudioEngine()
+                let engine = try AudioEngine()
+                self.audioEngine = engine
+                self.engineLock.unlock()
                 self.setupMicrophoneCallback()
                 self.setupInputAudioLevelCallback()
                 self.setupOutputAudioLevelCallback()
@@ -44,6 +51,7 @@ public class ExpoTwoWayAudioModule: Module {
                 self.setupErrorAndRouteCallbacks()
                 promise.resolve(nil)
             } catch {
+                self.engineLock.unlock()
                 print("Failed to initialize AudioEngine: \(error)")
                 self.sendEvent(
                     ON_ERROR_EVENT_NAME,
@@ -111,8 +119,10 @@ public class ExpoTwoWayAudioModule: Module {
         }
 
         Function("tearDown") {
+            self.engineLock.lock()
             self.audioEngine?.tearDown()
             self.audioEngine = nil
+            self.engineLock.unlock()
         }
 
         Function("restart") {
@@ -159,7 +169,6 @@ public class ExpoTwoWayAudioModule: Module {
             )
         }
 
-        // Define the events that can be emitted
         Events([
             ON_MIC_DATA_EVENT_NAME,
             ON_INPUT_VOLUME_LEVEL_EVENT_NAME,

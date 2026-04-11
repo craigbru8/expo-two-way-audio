@@ -34,9 +34,23 @@ class AudioEngine {
     private var discardFirstInputMillis = 2000
     
     private var isTornDown = false
+    private var inputConverter: AVAudioConverter?
     
-    enum AudioEngineError: Error {
+    enum AudioEngineError: Error, LocalizedError {
         case audioFormatError
+        case voiceProcessingFailed(String)
+        case inputFormatUnavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .audioFormatError:
+                return "Failed to create audio formats"
+            case .voiceProcessingFailed(let detail):
+                return "Voice processing setup failed: \(detail)"
+            case .inputFormatUnavailable:
+                return "Input node has no valid format (sampleRate or channelCount is 0)"
+            }
+        }
     }
     
     init() throws {
@@ -78,7 +92,7 @@ class AudioEngine {
             }
         
         self.setupAudioSession()
-        self.setup()
+        try self.setup()
         self.start()
     }
     
@@ -169,14 +183,13 @@ class AudioEngine {
         }
     }
     
-    func setup() {
+    func setup() throws {
         let input = avAudioEngine.inputNode
         do {
             try input.setVoiceProcessingEnabled(true)
         } catch {
             print("Could not enable voice processing \(error)")
-            emitError(code: "VOICE_PROCESSING", message: error.localizedDescription)
-            return
+            throw AudioEngineError.voiceProcessingFailed(error.localizedDescription)
         }
         
         avAudioEngine.inputNode.isVoiceProcessingInputMuted = !isRecording
@@ -187,19 +200,68 @@ class AudioEngine {
         avAudioEngine.connect(speechPlayer, to: mainMixer, format: outputFormat)
         avAudioEngine.connect(mainMixer, to: output, format: nil)
         
-        input.installTap(onBus: 0, bufferSize: 512, format: inputFormat) { [weak self] buffer, when in
-            if self?.isRecording == true && self?.discardRecording == false {
-                self?.processMicrophoneBuffer(buffer)
-                self?.updateInputVolume()
-            }
+        // Voice processing can change the input node's format capabilities.
+        // installTap throws an uncatchable NSException if the requested format
+        // is incompatible, so we always tap with the node's native format and
+        // only skip conversion when the core properties already match.
+        let nativeFormat = input.outputFormat(forBus: 0)
+        
+        guard nativeFormat.sampleRate > 0, nativeFormat.channelCount > 0 else {
+            throw AudioEngineError.inputFormatUnavailable
         }
         
-        mainMixer.installTap(onBus: 0, bufferSize: 768, format: outputFormat) { [weak self] buffer, when in
+        let formatsMatch = nativeFormat.sampleRate == inputFormat.sampleRate
+            && nativeFormat.channelCount == inputFormat.channelCount
+            && nativeFormat.commonFormat == inputFormat.commonFormat
+            && nativeFormat.isInterleaved == inputFormat.isInterleaved
+        
+        if formatsMatch {
+            inputConverter = nil
+        } else {
+            print("Input node native format (\(nativeFormat)) differs from desired (\(inputFormat)); converting")
+            inputConverter = AVAudioConverter(from: nativeFormat, to: inputFormat)
+        }
+        
+        let nativeBufSize = AVAudioFrameCount(512.0 * nativeFormat.sampleRate / inputFormat.sampleRate)
+        
+        input.installTap(onBus: 0, bufferSize: nativeBufSize, format: nativeFormat) { [weak self] buffer, _ in
+            guard let self = self, self.isRecording, !self.discardRecording else { return }
+            if let converter = self.inputConverter {
+                if let converted = self.convertBuffer(buffer, using: converter) {
+                    self.processMicrophoneBuffer(converted)
+                }
+            } else {
+                self.processMicrophoneBuffer(buffer)
+            }
+            self.updateInputVolume()
+        }
+        
+        mainMixer.installTap(onBus: 0, bufferSize: 768, format: outputFormat) { [weak self] buffer, _ in
             self?.processOutputBuffer(buffer)
             self?.updateOutputVolume()
         }
         
         avAudioEngine.prepare()
+    }
+    
+    private func convertBuffer(_ buffer: AVAudioPCMBuffer, using converter: AVAudioConverter) -> AVAudioPCMBuffer? {
+        let ratio = inputFormat.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio))
+        guard let output = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: capacity) else { return nil }
+        
+        var error: NSError?
+        var consumed = false
+        converter.convert(to: output, error: &error) { _, status in
+            if consumed {
+                status.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            status.pointee = .haveData
+            return buffer
+        }
+        
+        return error == nil ? output : nil
     }
     
     func processMicrophoneBuffer(_ buffer: AVAudioPCMBuffer) {
@@ -332,13 +394,6 @@ class AudioEngine {
         updateOutputVolume()
     }
     
-    // MARK: - Background Audio Approach
-    // This implementation follows the recommended approach for conversational AI:
-    // 1. No background audio capability - conversations pause when app backgrounds
-    // 2. Graceful interruption handling - clear audio state and notify user
-    // 3. Manual resume only - users must explicitly restart conversations
-    // 4. Better UX - matches user expectations for voice conversations
-    
     func resumeRecordingAndPlayer(){
         guard !isTornDown else { return }
         do {
@@ -423,7 +478,13 @@ class AudioEngine {
     private func handleMediaServicesWereReset() {
         guard !isTornDown else { return }
         self.avAudioEngine.stop()
-        self.setup()
+        do {
+            try self.setup()
+        } catch {
+            print("Failed to re-setup after media services reset: \(error)")
+            emitError(code: "MEDIA_RESET", message: error.localizedDescription)
+            return
+        }
         self.start()
     }
     
