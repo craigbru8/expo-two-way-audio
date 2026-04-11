@@ -34,6 +34,7 @@ class AudioEngine {
     private var discardFirstInputMillis = 2000
     
     private var isTornDown = false
+    private var isEngineReady = false
     private var inputConverter: AVAudioConverter?
     
     enum AudioEngineError: Error, LocalizedError {
@@ -41,6 +42,7 @@ class AudioEngine {
         case voiceProcessingFailed(String)
         case inputFormatUnavailable
         case outputTapFormatUnavailable
+        case engineStartFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -52,6 +54,8 @@ class AudioEngine {
                 return "Input node has no valid format (sampleRate or channelCount is 0)"
             case .outputTapFormatUnavailable:
                 return "Main mixer has no valid output format for tap installation"
+            case .engineStartFailed(let detail):
+                return "Audio engine failed to start: \(detail)"
             }
         }
     }
@@ -69,35 +73,12 @@ class AudioEngine {
         print("  Input format: \(String(describing: inputFormat))")
         print("  Output format: \(String(describing: outputFormat))")
         
-        engineConfigChangeObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: avAudioEngine,
-            queue: .main) { [weak self] _ in
-                self?.checkEngineIsRunning()
-            }
-        sessionInterruptionObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main) { [weak self] notification in
-                self?.handleAudioSessionInterruption(notification)
-            }
-        mediaServicesResetObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.mediaServicesWereResetNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main) { [weak self] _ in
-                self?.handleMediaServicesWereReset()
-            }
-        routeChangeObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.routeChangeNotification,
-            object: AVAudioSession.sharedInstance(),
-            queue: .main) { [weak self] notification in
-                self?.handleRouteChange(notification)
-            }
-        
         do {
             self.setupAudioSession()
             try self.setup()
-            self.start()
+            try self.start(throwOnError: true)
+            self.isEngineReady = true
+            self.addObservers()
         } catch {
             self.cleanupAfterFailedInitialization()
             throw error
@@ -131,7 +112,50 @@ class AudioEngine {
         onErrorCallback?(code, message)
     }
 
+    private func addObservers() {
+        guard engineConfigChangeObserver == nil,
+              sessionInterruptionObserver == nil,
+              mediaServicesResetObserver == nil,
+              routeChangeObserver == nil else {
+            return
+        }
+
+        engineConfigChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: avAudioEngine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.checkEngineIsRunning()
+        }
+
+        sessionInterruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleAudioSessionInterruption(notification)
+        }
+
+        mediaServicesResetObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleMediaServicesWereReset()
+        }
+
+        routeChangeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleRouteChange(notification)
+        }
+    }
+
     private func cleanupAfterFailedInitialization() {
+        isEngineReady = false
+        removeObservers()
         inputConverter = nil
         speechPlayer.stop()
         avAudioEngine.inputNode.removeTap(onBus: 0)
@@ -146,7 +170,7 @@ class AudioEngine {
     }
     
     private func handleRouteChange(_ notification: Notification) {
-        guard !isTornDown else { return }
+        guard !isTornDown, isEngineReady else { return }
         
         guard let info = notification.userInfo,
               let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
@@ -341,13 +365,16 @@ class AudioEngine {
         }
     }
     
-    func start() {
+    func start(throwOnError: Bool = false) throws {
         guard !isTornDown else { return }
         do {
             try avAudioEngine.start()
         } catch {
             print("Could not start audio engine: \(error)")
             emitError(code: "ENGINE_START", message: error.localizedDescription)
+            if throwOnError {
+                throw AudioEngineError.engineStartFailed(error.localizedDescription)
+            }
         }
     }
     
@@ -441,6 +468,7 @@ class AudioEngine {
     
     func tearDown() {
         isTornDown = true
+        isEngineReady = false
         removeObservers()
 
         let wasRecording = isRecording
@@ -470,9 +498,14 @@ class AudioEngine {
     }
     
     private func checkEngineIsRunning() {
-        guard !isTornDown else { return }
+        guard !isTornDown, isEngineReady else { return }
         if !avAudioEngine.isRunning {
-            start()
+            do {
+                try start(throwOnError: true)
+            } catch {
+                print("Failed to restart audio engine: \(error)")
+                emitError(code: "ENGINE_RESTART", message: error.localizedDescription)
+            }
         }
     }
     
@@ -509,16 +542,30 @@ class AudioEngine {
     }
     
     private func handleMediaServicesWereReset() {
-        guard !isTornDown else { return }
+        guard !isTornDown, isEngineReady else { return }
+        isEngineReady = false
         self.avAudioEngine.stop()
+        self.avAudioEngine.inputNode.removeTap(onBus: 0)
+        self.avAudioEngine.mainMixerNode.removeTap(onBus: 0)
+        self.inputConverter = nil
         do {
+            self.setupAudioSession()
             try self.setup()
         } catch {
             print("Failed to re-setup after media services reset: \(error)")
             emitError(code: "MEDIA_RESET", message: error.localizedDescription)
+            cleanupAfterFailedInitialization()
             return
         }
-        self.start()
+        do {
+            try self.start(throwOnError: true)
+        } catch {
+            print("Failed to restart after media services reset: \(error)")
+            emitError(code: "MEDIA_RESET", message: error.localizedDescription)
+            cleanupAfterFailedInitialization()
+            return
+        }
+        self.isEngineReady = true
     }
     
     private func updateInputVolume() {
