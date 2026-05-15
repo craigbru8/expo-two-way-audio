@@ -8,11 +8,11 @@ class AudioEngine {
     private var sessionInterruptionObserver: Any?
     private var mediaServicesResetObserver: Any?
     private var routeChangeObserver: Any?
-    
+
     public private(set) var inputFormat: AVAudioFormat
     public private(set) var outputFormat: AVAudioFormat
     public private(set) var isRecording = false
-    
+
     public var onMicDataCallback: ((Data) -> Void)?
     public var onInputVolumeCallback: ((Float) -> Void)?
     public var onOutputVolumeCallback: ((Float) -> Void)?
@@ -20,49 +20,56 @@ class AudioEngine {
     public var onRawAudioLevelCallback: ((Float) -> Void)?
     public var onErrorCallback: ((String, String) -> Void)?
     public var onAudioRouteChangeCallback: ((String) -> Void)?
-    
+
     private var inputLevelTimer: Timer?
     private var outputLevelTimer: Timer?
-    
+
     private var inputBuffer = [Float](repeating: 0, count: 2048)
     private var outputBuffer = [Float](repeating: 0, count: 2048)
     private var inputBufferIndex = 0
     private var outputBufferIndex = 0
-    
+
     private var hasFirstInputBeenDiscarded = false
     private var discardRecording = false
     private var discardFirstInputMillis = 2000
-    
+
     private var isTornDown = false
     private var isEngineReady = false
     private var inputConverter: AVAudioConverter?
-    
+
     enum AudioEngineError: Error, LocalizedError {
         case audioFormatError
+        case audioSessionCategoryFailed(String)
+        case audioSessionActivationFailed(String)
         case voiceProcessingFailed(String)
-        case inputFormatUnavailable
-        case outputTapFormatUnavailable
+        case inputFormatUnavailable(String)
+        case outputTapFormatUnavailable(String)
         case engineStartFailed(String)
+        case initializationRetryFailed(String)
 
         var errorDescription: String? {
             switch self {
             case .audioFormatError:
                 return "Failed to create audio formats"
+            case .audioSessionCategoryFailed(let detail):
+                return "Audio session category setup failed: \(detail)"
+            case .audioSessionActivationFailed(let detail):
+                return "Audio session activation failed: \(detail)"
             case .voiceProcessingFailed(let detail):
                 return "Voice processing setup failed: \(detail)"
-            case .inputFormatUnavailable:
-                return "Input node has no valid format (sampleRate or channelCount is 0)"
-            case .outputTapFormatUnavailable:
-                return "Main mixer has no valid output format for tap installation"
+            case .inputFormatUnavailable(let detail):
+                return "Input node has no valid format (sampleRate or channelCount is 0): \(detail)"
+            case .outputTapFormatUnavailable(let detail):
+                return "Main mixer has no valid output format for tap installation: \(detail)"
             case .engineStartFailed(let detail):
                 return "Audio engine failed to start: \(detail)"
+            case .initializationRetryFailed(let detail):
+                return "Audio engine initialization failed after retry: \(detail)"
             }
         }
     }
-    
+
     init() throws {
-        avAudioEngine.attach(speechPlayer)
-        
         guard let inputFmt = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1),
               let outputFmt = AVAudioFormat(standardFormatWithSampleRate: 24000, channels: 1) else {
             throw AudioEngineError.audioFormatError
@@ -72,23 +79,37 @@ class AudioEngine {
         print("AudioEngine initialized with dual sample rates:")
         print("  Input format: \(String(describing: inputFormat))")
         print("  Output format: \(String(describing: outputFormat))")
-        
+
+        attachSpeechPlayer()
+
         do {
-            self.setupAudioSession()
-            try self.setup()
-            try self.start(throwOnError: true)
-            self.isEngineReady = true
-            self.addObservers()
+            try self.performInitialSetup()
         } catch {
             self.cleanupAfterFailedInitialization()
-            throw error
+            guard self.shouldRetryInitialization(after: error) else {
+                throw error
+            }
+
+            let firstErrorDescription = error.localizedDescription
+            print("Retrying AudioEngine initialization after startup failure: \(firstErrorDescription)")
+            Thread.sleep(forTimeInterval: 0.35)
+            self.resetEngineForRetry()
+
+            do {
+                try self.performInitialSetup()
+            } catch {
+                self.cleanupAfterFailedInitialization()
+                throw AudioEngineError.initializationRetryFailed(
+                    "first=\(firstErrorDescription); retry=\(error.localizedDescription); \(self.diagnosticSnapshot(error: error))"
+                )
+            }
         }
     }
-    
+
     deinit {
         removeObservers()
     }
-    
+
     private func removeObservers() {
         if let observer = engineConfigChangeObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -107,9 +128,92 @@ class AudioEngine {
             routeChangeObserver = nil
         }
     }
-    
+
     private func emitError(code: String, message: String) {
         onErrorCallback?(code, message)
+    }
+
+    private func attachSpeechPlayer() {
+        avAudioEngine.attach(speechPlayer)
+    }
+
+    private func performInitialSetup() throws {
+        try setupAudioSession()
+        try setup()
+        try start(throwOnError: true)
+        isEngineReady = true
+        addObservers()
+    }
+
+    private func shouldRetryInitialization(after error: Error) -> Bool {
+        guard let audioError = error as? AudioEngineError else {
+            return false
+        }
+
+        switch audioError {
+        case .audioSessionActivationFailed,
+             .inputFormatUnavailable,
+             .outputTapFormatUnavailable,
+             .engineStartFailed:
+            return true
+        case .audioFormatError,
+             .audioSessionCategoryFailed,
+             .voiceProcessingFailed,
+             .initializationRetryFailed:
+            return false
+        }
+    }
+
+    private func resetEngineForRetry() {
+        isTornDown = false
+        isEngineReady = false
+        inputConverter = nil
+        avAudioEngine = AVAudioEngine()
+        speechPlayer = AVAudioPlayerNode()
+        attachSpeechPlayer()
+    }
+
+    private func diagnosticSnapshot(error: Error? = nil) -> String {
+        let session = AVAudioSession.sharedInstance()
+        var parts = [
+            "category=\(session.category.rawValue)",
+            "mode=\(session.mode.rawValue)",
+            "sampleRate=\(session.sampleRate)",
+            "inputChannels=\(session.inputNumberOfChannels)",
+            "outputChannels=\(session.outputNumberOfChannels)",
+            "otherAudioPlaying=\(session.isOtherAudioPlaying)",
+            "secondaryAudioSilenced=\(session.secondaryAudioShouldBeSilencedHint)",
+            "routeInputs=[\(describePorts(session.currentRoute.inputs))]",
+            "routeOutputs=[\(describePorts(session.currentRoute.outputs))]",
+            "inputFormat=\(describeFormat(avAudioEngine.inputNode.outputFormat(forBus: 0)))",
+            "outputInputFormat=\(describeFormat(avAudioEngine.outputNode.inputFormat(forBus: 0)))",
+            "mainMixerOutputFormat=\(describeFormat(avAudioEngine.mainMixerNode.outputFormat(forBus: 0)))"
+        ]
+
+        if let error = error {
+            let nsError = error as NSError
+            let userInfoKeys = nsError.userInfo.keys.map { "\($0)" }.sorted().joined(separator: ",")
+            parts.append("errorDomain=\(nsError.domain)")
+            parts.append("errorCode=\(nsError.code)")
+            parts.append("errorUserInfoKeys=[\(userInfoKeys)]")
+        }
+
+        return parts.joined(separator: "; ")
+    }
+
+    private func describePorts(_ ports: [AVAudioSessionPortDescription]) -> String {
+        if ports.isEmpty {
+            return "none"
+        }
+
+        return ports.map { port in
+            let channelCount = port.channels?.count ?? 0
+            return "\(port.portType.rawValue)(channels:\(channelCount))"
+        }.joined(separator: ",")
+    }
+
+    private func describeFormat(_ format: AVAudioFormat) -> String {
+        return "sampleRate:\(format.sampleRate), channels:\(format.channelCount), commonFormat:\(format.commonFormat), interleaved:\(format.isInterleaved)"
     }
 
     private func addObservers() {
@@ -168,10 +272,10 @@ class AudioEngine {
             print("Could not deactivate audio session after failed initialization: \(error)")
         }
     }
-    
+
     private func handleRouteChange(_ notification: Notification) {
         guard !isTornDown, isEngineReady else { return }
-        
+
         guard let info = notification.userInfo,
               let reasonValue = info[AVAudioSessionRouteChangeReasonKey] as? UInt,
               let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
@@ -186,49 +290,55 @@ class AudioEngine {
         case .wakeFromSleep: reasonStr = "wakeFromSleep"
         case .noSuitableRouteForCategory: reasonStr = "noSuitableRouteForCategory"
         case .routeConfigurationChange: reasonStr = "routeConfigurationChange"
+        case .unknown: reasonStr = "unknown"
         @unknown default:
             reasonStr = "other(\(reasonValue))"
         }
         onAudioRouteChangeCallback?(reasonStr)
         checkEngineIsRunning()
     }
-    
-    func setupAudioSession() {
+
+    func setupAudioSession() throws {
         let session = AVAudioSession.sharedInstance()
-        
+        var preferenceWarnings: [String] = []
+
         do {
             try session.setCategory(.playAndRecord, mode: .voiceChat, options: [
-                .defaultToSpeaker, 
-                .allowBluetooth, 
+                .defaultToSpeaker,
+                .allowBluetooth,
                 .allowBluetoothA2DP
             ])
         } catch {
             print("Could not set the audio category: \(error.localizedDescription)")
-            emitError(code: "AUDIO_SESSION", message: "setCategory: \(error.localizedDescription)")
+            throw AudioEngineError.audioSessionCategoryFailed("\(error.localizedDescription); \(diagnosticSnapshot(error: error))")
         }
-        
+
         do {
             try session.setPreferredSampleRate(max(inputFormat.sampleRate, outputFormat.sampleRate))
         } catch {
             print("Could not set the preferred sample rate: \(error.localizedDescription)")
-            emitError(code: "AUDIO_SESSION", message: "setPreferredSampleRate: \(error.localizedDescription)")
+            preferenceWarnings.append("setPreferredSampleRate: \(error.localizedDescription)")
         }
-        
+
         do {
             try session.setPreferredIOBufferDuration(0.032)
         } catch {
             print("Could not set the preferred IO buffer duration: \(error.localizedDescription)")
-            emitError(code: "AUDIO_SESSION", message: "setPreferredIOBufferDuration: \(error.localizedDescription)")
+            preferenceWarnings.append("setPreferredIOBufferDuration: \(error.localizedDescription)")
         }
-        
+
         do {
             try session.setActive(true)
         } catch {
-            print("Could not set the audio session as active")
-            emitError(code: "AUDIO_SESSION", message: "setActive(true) failed")
+            print("Could not set the audio session as active: \(error.localizedDescription)")
+            throw AudioEngineError.audioSessionActivationFailed("\(error.localizedDescription); \(diagnosticSnapshot(error: error))")
+        }
+
+        if !preferenceWarnings.isEmpty {
+            print("Audio session preference warnings: \(preferenceWarnings.joined(separator: "; "))")
         }
     }
-    
+
     func setup() throws {
         let input = avAudioEngine.inputNode
         do {
@@ -237,37 +347,37 @@ class AudioEngine {
             print("Could not enable voice processing \(error)")
             throw AudioEngineError.voiceProcessingFailed(error.localizedDescription)
         }
-        
+
         avAudioEngine.inputNode.isVoiceProcessingInputMuted = !isRecording
-        
+
         let output = avAudioEngine.outputNode
         let mainMixer = avAudioEngine.mainMixerNode
-        
+
         avAudioEngine.connect(speechPlayer, to: mainMixer, format: outputFormat)
         avAudioEngine.connect(mainMixer, to: output, format: nil)
-        
+
         // Voice processing can change the input node's format capabilities.
         // installTap throws an uncatchable NSException if the requested format
         // is incompatible, so we always tap with the node's native format and
         // only skip conversion when the core properties already match.
         let nativeFormat = input.outputFormat(forBus: 0)
-        
+
         guard nativeFormat.sampleRate > 0, nativeFormat.channelCount > 0 else {
-            throw AudioEngineError.inputFormatUnavailable
+            throw AudioEngineError.inputFormatUnavailable(diagnosticSnapshot())
         }
-        
+
         let formatsMatch = nativeFormat.sampleRate == inputFormat.sampleRate
             && nativeFormat.channelCount == inputFormat.channelCount
             && nativeFormat.commonFormat == inputFormat.commonFormat
             && nativeFormat.isInterleaved == inputFormat.isInterleaved
-        
+
         if formatsMatch {
             inputConverter = nil
         } else {
             print("Input node native format (\(nativeFormat)) differs from desired (\(inputFormat)); converting")
             inputConverter = AVAudioConverter(from: nativeFormat, to: inputFormat)
         }
-        
+
         let nativeBufSize = AVAudioFrameCount(
             max(1, Int(ceil(512.0 * nativeFormat.sampleRate / inputFormat.sampleRate)))
         )
@@ -286,7 +396,7 @@ class AudioEngine {
 
         let mixerTapFormat = mainMixer.outputFormat(forBus: 0)
         guard mixerTapFormat.sampleRate > 0, mixerTapFormat.channelCount > 0 else {
-            throw AudioEngineError.outputTapFormatUnavailable
+            throw AudioEngineError.outputTapFormatUnavailable(diagnosticSnapshot())
         }
 
         let mixerTapBufferSize = AVAudioFrameCount(
@@ -297,15 +407,15 @@ class AudioEngine {
             self?.processOutputBuffer(buffer)
             self?.updateOutputVolume()
         }
-        
+
         avAudioEngine.prepare()
     }
-    
+
     private func convertBuffer(_ buffer: AVAudioPCMBuffer, using converter: AVAudioConverter) -> AVAudioPCMBuffer? {
         let ratio = inputFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio))
         guard let output = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: capacity) else { return nil }
-        
+
         var error: NSError?
         var consumed = false
         converter.convert(to: output, error: &error) { _, status in
@@ -317,54 +427,54 @@ class AudioEngine {
             status.pointee = .haveData
             return buffer
         }
-        
+
         return error == nil ? output : nil
     }
-    
+
     func processMicrophoneBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else {
             print("Error: Could not access channel data")
             emitError(code: "MIC_PIPELINE", message: "Could not access microphone channel data")
             return
         }
-        
+
         let frameCount = Int(buffer.frameLength)
         var int16Samples = [Int16](repeating: 0, count: frameCount)
-        
+
         var rawLevel: Float = 0.0
         for i in 0..<frameCount {
             let floatSample = max(-1.0, min(1.0, channelData[i]))
             int16Samples[i] = Int16(floatSample * Float(Int16.max))
-            
+
             inputBuffer[inputBufferIndex] = floatSample
             inputBufferIndex = (inputBufferIndex + 1) % inputBuffer.count
-            
+
             rawLevel += abs(floatSample)
         }
-        
+
         onRawAudioLevelCallback?(rawLevel / Float(frameCount))
-        
+
         let data = Data(bytes: int16Samples, count: frameCount * MemoryLayout<Int16>.size)
-        
+
         onMicDataCallback?(data)
     }
-    
+
     func processOutputBuffer(_ buffer: AVAudioPCMBuffer) {
         guard let channelData = buffer.floatChannelData?[0] else {
             print("Error: Could not access channel data")
             emitError(code: "OUTPUT_PIPELINE", message: "Could not access output channel data")
             return
         }
-        
+
         let frameCount = Int(buffer.frameLength)
-        
+
         for i in 0..<frameCount {
             let floatSample = max(-1.0, min(1.0, channelData[i]))
             outputBuffer[outputBufferIndex] = floatSample
             outputBufferIndex = (outputBufferIndex + 1) % outputBuffer.count
         }
     }
-    
+
     func start(throwOnError: Bool = false) throws {
         guard !isTornDown else { return }
         do {
@@ -373,14 +483,14 @@ class AudioEngine {
             print("Could not start audio engine: \(error)")
             emitError(code: "ENGINE_START", message: error.localizedDescription)
             if throwOnError {
-                throw AudioEngineError.engineStartFailed(error.localizedDescription)
+                throw AudioEngineError.engineStartFailed("\(error.localizedDescription); \(diagnosticSnapshot(error: error))")
             }
         }
     }
-    
+
     func playPCMData(_ pcmData: Data) {
         guard !isTornDown else { return }
-        
+
         if !hasFirstInputBeenDiscarded {
             self.hasFirstInputBeenDiscarded = true
             self.discardRecording = true
@@ -388,29 +498,29 @@ class AudioEngine {
                 self.discardRecording = false
             }
         }
-        
+
         guard let buffer = createBuffer(from: pcmData) else {
             print("Failed to create audio buffer")
             emitError(code: "PLAYBACK", message: "Failed to create audio buffer")
             return
         }
         speechPlayer.scheduleBuffer(buffer)
-        
+
         if !speechPlayer.isPlaying {
             speechPlayer.play()
         }
     }
 
-    
+
     private func createBuffer(from data: Data) -> AVAudioPCMBuffer? {
         let frameCount = UInt32(data.count) / 2
-        
+
         guard let buffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else {
             return nil
         }
-        
+
         buffer.frameLength = frameCount
-        
+
         data.withUnsafeBytes { (rawBufferPointer: UnsafeRawBufferPointer) in
             if let sourcePtr = rawBufferPointer.baseAddress?.assumingMemoryBound(to: Int16.self),
                let destPtr = buffer.floatChannelData?[0] {
@@ -419,15 +529,15 @@ class AudioEngine {
                 }
             }
         }
-        
+
         return buffer
     }
-    
+
     func bypassVoiceProcessing(_ bypass: Bool) {
         let input = avAudioEngine.inputNode
         input.isVoiceProcessingBypassed = bypass
     }
-    
+
     func toggleRecording(_ val: Bool) -> Bool {
         guard !isTornDown else { return false }
         isRecording = val
@@ -439,21 +549,21 @@ class AudioEngine {
             avAudioEngine.inputNode.isVoiceProcessingInputMuted = false
         }
         print("Recording \(isRecording ? "started" : "stopped")")
-        
+
         return isRecording
     }
-    
+
     func stopRecordingAndPlayer(){
         do {
             try AVAudioSession.sharedInstance().setActive(false)
         } catch {
             print("Could not set the audio session to inactive: \(error)")
         }
-        toggleRecording(false)
+        _ = toggleRecording(false)
         speechPlayer.stop()
         updateOutputVolume()
     }
-    
+
     func resumeRecordingAndPlayer(){
         guard !isTornDown else { return }
         do {
@@ -465,7 +575,7 @@ class AudioEngine {
         isRecording = toggleRecording(true)
         speechPlayer.play()
     }
-    
+
     func tearDown() {
         isTornDown = true
         isEngineReady = false
@@ -485,18 +595,18 @@ class AudioEngine {
             print("Could not deactivate audio session during teardown: \(error)")
         }
     }
-    
+
     var isPlaying: Bool {
         return speechPlayer.isPlaying
     }
-    
+
     func clearAudioQueue() {
         speechPlayer.stop()
         outputBuffer = [Float](repeating: 0, count: outputBuffer.count)
         updateOutputVolume()
         print("Audio queue cleared")
     }
-    
+
     private func checkEngineIsRunning() {
         guard !isTornDown, isEngineReady else { return }
         if !avAudioEngine.isRunning {
@@ -508,10 +618,10 @@ class AudioEngine {
             }
         }
     }
-    
+
     private func handleAudioSessionInterruption(_ notification: Notification) {
         guard !isTornDown else { return }
-        
+
         guard let userInfo = notification.userInfo,
               let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
@@ -530,17 +640,17 @@ class AudioEngine {
             onAudioInterruptionCallback?("unknown")
         }
     }
-    
+
     private func pauseConversation() {
         print("Pausing conversation due to interruption")
         self.stopRecordingAndPlayer()
         clearAudioQueue()
     }
-    
+
     private func scheduleReEngagementNotification() {
         print("Conversation paused - user should be notified to re-engage")
     }
-    
+
     private func handleMediaServicesWereReset() {
         guard !isTornDown, isEngineReady else { return }
         isEngineReady = false
@@ -549,7 +659,7 @@ class AudioEngine {
         self.avAudioEngine.mainMixerNode.removeTap(onBus: 0)
         self.inputConverter = nil
         do {
-            self.setupAudioSession()
+            try self.setupAudioSession()
             try self.setup()
         } catch {
             print("Failed to re-setup after media services reset: \(error)")
@@ -567,29 +677,29 @@ class AudioEngine {
         }
         self.isEngineReady = true
     }
-    
+
     private func updateInputVolume() {
         let volume = calculateRMSLevel(from: inputBuffer)
         onInputVolumeCallback?(volume)
     }
-    
+
     private func updateOutputVolume() {
         let volume = calculateRMSLevel(from: outputBuffer)
         onOutputVolumeCallback?(volume)
     }
-    
+
     private func calculateRMSLevel(from buffer: [Float]) -> Float {
         let epsilon: Float = 1e-5
         let rmsValue = sqrt(buffer.reduce(0) { $0 + $1 * $1 } / Float(buffer.count))
-        
+
         let dbValue = 20 * log10(max(rmsValue, epsilon))
-        
+
         let minDb: Float = -80.0
         let normalizedValue = max(0.0, min(1.0, (dbValue - minDb) / abs(minDb)))
-        
+
         let expFactor: Float = 2.0
         let adjustedValue = pow(normalizedValue, expFactor)
-        
+
         return adjustedValue
     }
 }
